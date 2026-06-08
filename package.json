@@ -2,25 +2,68 @@
   "name": "slide-teaching-app",
   "version": "0.1.0",
   "private": true,
+  "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:electron": "tsc -p tsconfig.electron.json",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "desktop:dev": "npm run build:electron && concurrently -k \"next dev\" \"wait-on http://localhost:3000 && cross-env ELECTRON_RENDERER_URL=http://localhost:3000 electron dist-electron/electron/main.js\"",
+    "desktop:pack": "npm run build && npm run build:electron && electron-builder --dir",
+    "desktop:dist": "npm run build && npm run build:electron && electron-builder"
   },
   "dependencies": {
+    "@google/genai": "^2.8.0",
+    "katex": "^0.17.0",
+    "lucide-react": "^1.17.0",
     "next": "16.2.7",
+    "pdfjs-dist": "^6.0.227",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^10.0.3",
+    "cross-env": "^10.1.0",
+    "electron": "^42.3.3",
+    "electron-builder": "^26.15.2",
     "eslint": "^9",
     "eslint-config-next": "16.2.7",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^9.0.10"
+  },
+  "build": {
+    "appId": "com.slidetutor.desktop",
+    "productName": "Slide Tutor",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "piper",
+        "to": "piper",
+        "filter": ["**/*.onnx", "**/*.onnx.json", "piper.exe", "*.dll"]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
   }
 }
