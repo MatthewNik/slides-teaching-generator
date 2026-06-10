@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { spawn } from "child_process";
-import { promises as fs } from "fs";
+import { promises as fs, existsSync } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { GoogleGenAI } from "@google/genai";
@@ -20,7 +20,14 @@ import type {
   DeckSummary,
   FolderIndex,
   SlideTranscript,
+  SlideTranscriptVariant,
 } from "../src/lib/types";
+import {
+  TRANSCRIPT_MODE_PRESETS,
+  coerceTranscriptMode,
+  DEFAULT_TRANSCRIPT_MODE,
+  type TranscriptMode,
+} from "../src/lib/transcriptModes";
 import type { DesktopApiResult, ImportedSlideInput, SlideUpdate } from "../src/types/electron";
 
 const MODEL = "gemini-2.5-flash";
@@ -57,8 +64,53 @@ function pdfPath(deckId: string) {
   return path.join(deckDir(deckId), "source.pdf");
 }
 
-function audioPath(deckId: string, slideNumber: number) {
-  return path.join(deckDir(deckId), "audio", `slide-${slideNumber}.wav`);
+function audioFileName(slideNumber: number, mode: TranscriptMode) {
+  return mode === DEFAULT_TRANSCRIPT_MODE
+    ? `slide-${slideNumber}.wav`
+    : `slide-${slideNumber}-${mode}.wav`;
+}
+
+function audioPath(deckId: string, slideNumber: number, mode: TranscriptMode) {
+  return path.join(deckDir(deckId), "audio", audioFileName(slideNumber, mode));
+}
+
+function variantFromSlide(slide: SlideTranscript): SlideTranscriptVariant {
+  return {
+    transcriptMarkdown: slide.transcriptMarkdown,
+    transcriptLatex: slide.transcriptLatex,
+    speechText: slide.speechText,
+    keyTerms: slide.keyTerms ?? [],
+    generationStatus: slide.generationStatus,
+    audioPath: slide.audioPath,
+    ttsStatus: slide.ttsStatus,
+    ttsError: slide.ttsError,
+  };
+}
+
+/** Mirror a variant onto the legacy top-level slide fields for backward compatibility. */
+function mirrorTopLevel(
+  slide: SlideTranscript,
+  variant: SlideTranscriptVariant,
+): SlideTranscript {
+  return {
+    ...slide,
+    transcriptMarkdown: variant.transcriptMarkdown,
+    transcriptLatex: variant.transcriptLatex,
+    speechText: variant.speechText,
+    keyTerms: variant.keyTerms,
+    generationStatus: variant.generationStatus,
+    audioPath: variant.audioPath,
+    ttsStatus: variant.ttsStatus,
+    ttsError: variant.ttsError,
+  };
+}
+
+function modeEntries(
+  byMode: Partial<Record<TranscriptMode, SlideTranscriptVariant>>,
+): [TranscriptMode, SlideTranscriptVariant][] {
+  return Object.entries(byMode).filter(
+    (entry): entry is [TranscriptMode, SlideTranscriptVariant] => Boolean(entry[1]),
+  );
 }
 
 function assertDeckId(deckId: string) {
@@ -115,6 +167,7 @@ function defaultSettings(): AppSettings {
     viewerShowTranscript: true,
     viewerAutoplayAudio: false,
     transcriptMathMode: "conservative",
+    transcriptMode: DEFAULT_TRANSCRIPT_MODE,
   };
 }
 
@@ -159,6 +212,7 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       settings.viewerAutoplayAudio ?? defaults.viewerAutoplayAudio,
     ),
     transcriptMathMode: "conservative",
+    transcriptMode: coerceTranscriptMode(settings.transcriptMode),
   };
 }
 
@@ -218,37 +272,67 @@ async function readDeck(deckId: string) {
   return readJson<DeckManifest | null>(manifestPath(deckId), null);
 }
 
-async function reconcileDeckAudio(deck: DeckManifest) {
+/**
+ * Bring a deck read from disk up to date:
+ * - migrate legacy single-transcript slides into `transcriptsByMode.summary`
+ * - attach any audio files found on disk to the matching mode variant
+ * - keep the legacy top-level fields mirroring the summary variant
+ */
+async function reconcileDeck(deck: DeckManifest) {
   const audioDir = path.join(deckDir(deck.id), "audio");
   let files: string[] = [];
 
   try {
     files = await fs.readdir(audioDir);
   } catch {
-    return deck;
+    files = [];
   }
 
+  const fileSet = new Set(files);
   let changed = false;
 
-  const slides = deck.slides.map((slide) => {
-    if (slide.audioPath) {
-      return slide;
+  const slides = deck.slides.map((original) => {
+    let slide = original;
+
+    // Migrate legacy decks: existing top-level transcript becomes the summary variant.
+    if (!slide.transcriptsByMode || Object.keys(slide.transcriptsByMode).length === 0) {
+      slide = {
+        ...slide,
+        transcriptsByMode: slide.transcriptMarkdown.trim()
+          ? { [DEFAULT_TRANSCRIPT_MODE]: variantFromSlide(slide) }
+          : {},
+      };
+      changed = true;
     }
 
-    const expectedFile = `slide-${slide.slideNumber}.wav`;
+    const byMode = { ...(slide.transcriptsByMode ?? {}) };
+    let slideChanged = false;
 
-    if (!files.includes(expectedFile)) {
-      return slide;
+    for (const [mode, variant] of modeEntries(byMode)) {
+      if (variant.audioPath) continue;
+
+      const expected = audioFileName(slide.slideNumber, mode);
+      if (fileSet.has(expected)) {
+        byMode[mode] = {
+          ...variant,
+          audioPath: path.posix.join("audio", expected),
+          ttsStatus: "ready",
+          ttsError: undefined,
+        };
+        slideChanged = true;
+      }
     }
 
-    changed = true;
+    if (slideChanged) {
+      slide = { ...slide, transcriptsByMode: byMode };
+      const summary = byMode[DEFAULT_TRANSCRIPT_MODE];
+      if (summary) {
+        slide = mirrorTopLevel(slide, summary);
+      }
+      changed = true;
+    }
 
-    return {
-      ...slide,
-      audioPath: path.posix.join("audio", expectedFile),
-      ttsStatus: "ready" as const,
-      ttsError: undefined,
-    };
+    return slide;
   });
 
   if (!changed) {
@@ -265,7 +349,7 @@ async function requireDeck(deckId: string) {
     throw new Error("Deck not found.");
   }
 
-  return reconcileDeckAudio(deck);
+  return reconcileDeck(deck);
 }
 
 async function saveDeck(deck: DeckManifest) {
@@ -290,18 +374,11 @@ async function saveSettings(settings: AppSettings) {
   return normalized;
 }
 
-async function choosePdfAndCreateDeck(title: string, window: BrowserWindow) {
-  const choice = await dialog.showOpenDialog(window, {
-    title: "Choose slide PDF",
-    properties: ["openFile"],
-    filters: [{ name: "PDF files", extensions: ["pdf"] }],
-  });
-
-  if (choice.canceled || choice.filePaths.length === 0) {
-    return null;
+async function createDeckFromPdfPath(sourcePath: string, title: string) {
+  if (!sourcePath.toLowerCase().endsWith(".pdf")) {
+    throw new Error("Only PDF files can be imported.");
   }
 
-  const sourcePath = choice.filePaths[0];
   const stats = await fs.stat(sourcePath);
 
   if (stats.size > 50 * 1024 * 1024) {
@@ -329,13 +406,32 @@ async function choosePdfAndCreateDeck(title: string, window: BrowserWindow) {
   return saveDeck(deck);
 }
 
-function buildGeminiPrompt(deck: DeckManifest) {
+async function choosePdfAndCreateDeck(title: string, window: BrowserWindow) {
+  const choice = await dialog.showOpenDialog(window, {
+    title: "Choose slide PDF",
+    properties: ["openFile"],
+    filters: [{ name: "PDF files", extensions: ["pdf"] }],
+  });
+
+  if (choice.canceled || choice.filePaths.length === 0) {
+    return null;
+  }
+
+  return createDeckFromPdfPath(choice.filePaths[0], title);
+}
+
+function buildGeminiPrompt(deck: DeckManifest, mode: TranscriptMode) {
+  const preset = TRANSCRIPT_MODE_PRESETS[mode];
+
   return `
 You are creating teaching notes for a PDF slide deck named "${deck.title}".
 
 For every PDF page, create exactly one slide transcript object. The result must include every page in order.
 
 Write for a student who is learning from the slide without a live instructor.
+
+Transcript style: ${preset.label}.
+${preset.promptInstructions}
 
 Requirements:
 - Explain the visible content on the slide, not generic background only.
@@ -350,7 +446,8 @@ Requirements:
 `;
 }
 
-async function generateTranscripts(deckId: string) {
+async function generateTranscripts(deckId: string, modeInput: TranscriptMode) {
+  const mode = coerceTranscriptMode(modeInput);
   const settings = await getSettings();
   const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY;
 
@@ -390,7 +487,7 @@ async function generateTranscripts(deckId: string) {
                 mimeType: uploadedFile.mimeType ?? "application/pdf",
               },
             },
-            { text: buildGeminiPrompt(processingDeck) },
+            { text: buildGeminiPrompt(processingDeck, mode) },
           ],
         },
       ],
@@ -406,22 +503,67 @@ async function generateTranscripts(deckId: string) {
     }
 
     const parsed = geminiSlidesResponseSchema.parse(JSON.parse(response.text));
-    const slides = parsed.slides
-      .map(
-        (slide): SlideTranscript => ({
-          ...slide,
-          transcriptMarkdown: normalizeMathFragments(slide.transcriptMarkdown),
-          keyTerms: slide.keyTerms ?? [],
-          generationStatus: "generated",
-          ttsStatus: "none",
-        }),
-      )
-      .sort((a, b) => a.slideNumber - b.slideNumber);
+    const parsedByNumber = new Map(parsed.slides.map((slide) => [slide.slideNumber, slide]));
+    const existingByNumber = new Map(
+      processingDeck.slides.map((slide) => [slide.slideNumber, slide]),
+    );
+    const slideNumbers = Array.from(
+      new Set([...existingByNumber.keys(), ...parsedByNumber.keys()]),
+    ).sort((a, b) => a - b);
+
+    // Merge generated content into the selected mode only, preserving other modes.
+    const slides: SlideTranscript[] = slideNumbers.map((slideNumber) => {
+      const existing = existingByNumber.get(slideNumber);
+      const incoming = parsedByNumber.get(slideNumber);
+
+      if (!incoming) {
+        return existing as SlideTranscript;
+      }
+
+      const normalizedMarkdown = normalizeMathFragments(incoming.transcriptMarkdown);
+      const variant: SlideTranscriptVariant = {
+        transcriptMarkdown: normalizedMarkdown,
+        transcriptLatex: incoming.transcriptLatex || normalizedMarkdown,
+        speechText: incoming.speechText,
+        keyTerms: incoming.keyTerms ?? [],
+        generationStatus: "generated",
+        ttsStatus: "none",
+        audioPath: undefined,
+        ttsError: undefined,
+      };
+
+      const base: SlideTranscript = existing ?? {
+        slideNumber,
+        title: incoming.title,
+        transcriptMarkdown: "",
+        transcriptLatex: "",
+        speechText: "",
+        keyTerms: [],
+        generationStatus: "draft",
+        transcriptsByMode: {},
+      };
+
+      const byMode = { ...(base.transcriptsByMode ?? {}), [mode]: variant };
+      let slide: SlideTranscript = {
+        ...base,
+        title: incoming.title || base.title,
+        transcriptsByMode: byMode,
+      };
+
+      // Keep the legacy top-level fields populated (summary is canonical; for other
+      // modes only fill top-level when it is still empty so back-compat consumers work).
+      if (mode === DEFAULT_TRANSCRIPT_MODE || !slide.transcriptMarkdown.trim()) {
+        slide = mirrorTopLevel(slide, variant);
+        slide.title = incoming.title || base.title;
+      }
+
+      return slide;
+    });
 
     return saveDeck({
       ...processingDeck,
       status: "ready",
-      pageCount: slides.length,
+      pageCount: parsed.slides.length || processingDeck.pageCount,
       slides,
       error: undefined,
     });
@@ -435,7 +577,13 @@ async function generateTranscripts(deckId: string) {
   }
 }
 
-async function saveSlide(deckId: string, slideNumber: number, update: SlideUpdate) {
+async function saveSlide(
+  deckId: string,
+  slideNumber: number,
+  update: SlideUpdate,
+  modeInput: TranscriptMode,
+) {
+  const mode = coerceTranscriptMode(modeInput);
   const deck = await requireDeck(deckId);
   const parsed = slideUpdateSchema.parse(update);
   let found = false;
@@ -446,18 +594,40 @@ async function saveSlide(deckId: string, slideNumber: number, update: SlideUpdat
     }
 
     found = true;
-    const speechChanged = parsed.speechText.trim() !== slide.speechText.trim();
     const normalizedMarkdown = normalizeMathFragments(parsed.transcriptMarkdown);
+    const prevVariant =
+      slide.transcriptsByMode?.[mode] ??
+      (mode === DEFAULT_TRANSCRIPT_MODE ? variantFromSlide(slide) : undefined);
+    const speechChanged = parsed.speechText.trim() !== (prevVariant?.speechText.trim() ?? "");
 
-    return {
-      ...slide,
-      ...parsed,
+    const variant: SlideTranscriptVariant = {
       transcriptMarkdown: normalizedMarkdown,
-      generationStatus: "reviewed" as const,
-      audioPath: speechChanged ? undefined : slide.audioPath,
-      ttsStatus: speechChanged ? ("none" as const) : slide.audioPath ? ("ready" as const) : ("none" as const),
-      ttsError: speechChanged ? undefined : slide.ttsError,
+      transcriptLatex: parsed.transcriptLatex,
+      speechText: parsed.speechText,
+      keyTerms: parsed.keyTerms,
+      generationStatus: "reviewed",
+      audioPath: speechChanged ? undefined : prevVariant?.audioPath,
+      ttsStatus: speechChanged
+        ? "none"
+        : prevVariant?.audioPath
+          ? "ready"
+          : prevVariant?.ttsStatus ?? "none",
+      ttsError: speechChanged ? undefined : prevVariant?.ttsError,
     };
+
+    const byMode = { ...(slide.transcriptsByMode ?? {}), [mode]: variant };
+    let next: SlideTranscript = {
+      ...slide,
+      title: parsed.title,
+      transcriptsByMode: byMode,
+    };
+
+    if (mode === DEFAULT_TRANSCRIPT_MODE) {
+      next = mirrorTopLevel(next, variant);
+      next.title = parsed.title;
+    }
+
+    return next;
   });
 
   if (!found) {
@@ -480,10 +650,23 @@ async function reformatDeckMath(deckId: string) {
 
   return saveDeck({
     ...deck,
-    slides: deck.slides.map((slide) => ({
-      ...slide,
-      transcriptMarkdown: normalizeMathFragments(slide.transcriptMarkdown),
-    })),
+    slides: deck.slides.map((slide) => {
+      const byMode = slide.transcriptsByMode ?? {};
+      const reformattedByMode: Partial<Record<TranscriptMode, SlideTranscriptVariant>> = {};
+
+      for (const [mode, variant] of modeEntries(byMode)) {
+        reformattedByMode[mode] = {
+          ...variant,
+          transcriptMarkdown: normalizeMathFragments(variant.transcriptMarkdown),
+        };
+      }
+
+      return {
+        ...slide,
+        transcriptMarkdown: normalizeMathFragments(slide.transcriptMarkdown),
+        transcriptsByMode: reformattedByMode,
+      };
+    }),
   });
 }
 
@@ -547,11 +730,20 @@ async function importExternalTranscripts(deckId: string, slides: ImportedSlideIn
       .sort((a, b) => a.slideNumber - b.slideNumber);
   }
 
+  // Imported content is treated as the canonical "summary" mode transcript.
+  const slidesWithModes = updatedSlides.map((slide) => ({
+    ...slide,
+    transcriptsByMode: {
+      ...(slide.transcriptsByMode ?? {}),
+      [DEFAULT_TRANSCRIPT_MODE]: variantFromSlide(slide),
+    },
+  }));
+
   return saveDeck({
     ...deck,
     status: "ready",
-    pageCount: deck.pageCount ?? updatedSlides.length,
-    slides: updatedSlides,
+    pageCount: deck.pageCount ?? slidesWithModes.length,
+    slides: slidesWithModes,
     error: undefined,
   });
 }
@@ -649,7 +841,34 @@ async function runPiperForSlide(
   });
 }
 
-async function generateSlideAudio(deckId: string, slideNumber: number) {
+/** Update one mode variant on a single slide, mirroring summary to the top level. */
+function patchSlideVariant(
+  slide: SlideTranscript,
+  mode: TranscriptMode,
+  patch: Partial<SlideTranscriptVariant>,
+): SlideTranscript {
+  const prev = slide.transcriptsByMode?.[mode];
+  if (!prev) {
+    return slide;
+  }
+
+  const nextVariant: SlideTranscriptVariant = { ...prev, ...patch };
+  const byMode = { ...(slide.transcriptsByMode ?? {}), [mode]: nextVariant };
+  let next: SlideTranscript = { ...slide, transcriptsByMode: byMode };
+
+  if (mode === DEFAULT_TRANSCRIPT_MODE) {
+    next = mirrorTopLevel(next, nextVariant);
+  }
+
+  return next;
+}
+
+async function generateSlideAudio(
+  deckId: string,
+  slideNumber: number,
+  modeInput: TranscriptMode,
+) {
+  const mode = coerceTranscriptMode(modeInput);
   const settings = await getSettings();
   const deck = await requireDeck(deckId);
   const slide = deck.slides.find((item) => item.slideNumber === slideNumber);
@@ -658,49 +877,59 @@ async function generateSlideAudio(deckId: string, slideNumber: number) {
     throw new Error("Slide not found.");
   }
 
-  if (!slide.speechText.trim()) {
-    throw new Error("This slide has no narration text to synthesize.");
+  const variant = slide.transcriptsByMode?.[mode];
+
+  if (!variant || !variant.speechText.trim()) {
+    throw new Error(
+      `This slide has no ${TRANSCRIPT_MODE_PRESETS[mode].label} narration text to synthesize.`,
+    );
   }
 
-  const outputPath = audioPath(deckId, slideNumber);
+  const outputPath = audioPath(deckId, slideNumber, mode);
   await ensureDir(path.dirname(outputPath));
 
-  const slides = deck.slides.map((item) =>
-    item.slideNumber === slideNumber
-      ? { ...item, ttsStatus: "generating" as const, ttsError: undefined }
-      : item,
-  );
-  await saveDeck({ ...deck, slides });
+  await saveDeck({
+    ...deck,
+    slides: deck.slides.map((item) =>
+      item.slideNumber === slideNumber
+        ? patchSlideVariant(item, mode, { ttsStatus: "generating", ttsError: undefined })
+        : item,
+    ),
+  });
 
   try {
-    await runPiperForSlide(settings, slide.speechText, outputPath);
+    await runPiperForSlide(settings, variant.speechText, outputPath);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Piper synthesis failed.";
-    const failedSlides = (await requireDeck(deckId)).slides.map((item) =>
-      item.slideNumber === slideNumber
-        ? { ...item, ttsStatus: "error" as const, ttsError: message }
-        : item,
-    );
-    await saveDeck({ ...(await requireDeck(deckId)), slides: failedSlides });
+    const failed = await requireDeck(deckId);
+    await saveDeck({
+      ...failed,
+      slides: failed.slides.map((item) =>
+        item.slideNumber === slideNumber
+          ? patchSlideVariant(item, mode, { ttsStatus: "error", ttsError: message })
+          : item,
+      ),
+    });
     throw error;
   }
 
   const refreshedDeck = await requireDeck(deckId);
-  const readySlides = refreshedDeck.slides.map((item) =>
-    item.slideNumber === slideNumber
-      ? {
-          ...item,
-          audioPath: path.relative(deckDir(deckId), outputPath),
-          ttsStatus: "ready" as const,
-          ttsError: undefined,
-        }
-      : item,
-  );
-
-  return saveDeck({ ...refreshedDeck, slides: readySlides });
+  return saveDeck({
+    ...refreshedDeck,
+    slides: refreshedDeck.slides.map((item) =>
+      item.slideNumber === slideNumber
+        ? patchSlideVariant(item, mode, {
+            audioPath: path.relative(deckDir(deckId), outputPath),
+            ttsStatus: "ready",
+            ttsError: undefined,
+          })
+        : item,
+    ),
+  });
 }
 
-async function generateDeckAudio(deckId: string) {
+async function generateDeckAudio(deckId: string, modeInput: TranscriptMode) {
+  const mode = coerceTranscriptMode(modeInput);
   const deck = await requireDeck(deckId);
 
   if (deck.slides.length === 0) {
@@ -710,25 +939,32 @@ async function generateDeckAudio(deckId: string) {
   let currentDeck = deck;
 
   for (const slide of deck.slides) {
-    if (!slide.speechText.trim()) {
+    const variant = slide.transcriptsByMode?.[mode];
+    if (!variant || !variant.speechText.trim()) {
       continue;
     }
 
-    currentDeck = await generateSlideAudio(deckId, slide.slideNumber);
+    currentDeck = await generateSlideAudio(deckId, slide.slideNumber, mode);
   }
 
   return currentDeck;
 }
 
-async function getSlideAudioBytes(deckId: string, slideNumber: number) {
+async function getSlideAudioBytes(
+  deckId: string,
+  slideNumber: number,
+  modeInput: TranscriptMode,
+) {
+  const mode = coerceTranscriptMode(modeInput);
   const deck = await requireDeck(deckId);
   const slide = deck.slides.find((item) => item.slideNumber === slideNumber);
+  const audioRelativePath = slide?.transcriptsByMode?.[mode]?.audioPath;
 
-  if (!slide?.audioPath) {
+  if (!audioRelativePath) {
     return null;
   }
 
-  return fs.readFile(path.join(deckDir(deckId), slide.audioPath));
+  return fs.readFile(path.join(deckDir(deckId), audioRelativePath));
 }
 
 function api<T>(handler: () => Promise<T>): Promise<DesktopApiResult<T>> {
@@ -745,14 +981,19 @@ function registerIpc(mainWindow: BrowserWindow) {
   ipcMain.handle("decks:choose-pdf-create", (_event, title: string) =>
     api(() => choosePdfAndCreateDeck(title, mainWindow)),
   );
+  ipcMain.handle("decks:create-from-pdf-path", (_event, sourcePath: string, title: string) =>
+    api(() => createDeckFromPdfPath(sourcePath, title)),
+  );
   ipcMain.handle("decks:get", (_event, deckId: string) => api(() => requireDeck(deckId)));
-  ipcMain.handle("decks:generate-transcripts", (_event, deckId: string) =>
-    api(() => generateTranscripts(deckId)),
+  ipcMain.handle(
+    "decks:generate-transcripts",
+    (_event, deckId: string, mode: TranscriptMode) =>
+      api(() => generateTranscripts(deckId, mode)),
   );
   ipcMain.handle(
     "decks:save-slide",
-    (_event, deckId: string, slideNumber: number, update: SlideUpdate) =>
-      api(() => saveSlide(deckId, slideNumber, update)),
+    (_event, deckId: string, slideNumber: number, update: SlideUpdate, mode: TranscriptMode) =>
+      api(() => saveSlide(deckId, slideNumber, update, mode)),
   );
   ipcMain.handle("decks:publish", (_event, deckId: string) => api(() => publishDeck(deckId)));
   ipcMain.handle("decks:reformat-math", (_event, deckId: string) =>
@@ -775,14 +1016,18 @@ function registerIpc(mainWindow: BrowserWindow) {
   ipcMain.handle("decks:get-pdf-bytes", (_event, deckId: string) =>
     api(() => fs.readFile(pdfPath(deckId))),
   );
-  ipcMain.handle("tts:generate-slide-audio", (_event, deckId: string, slideNumber: number) =>
-    api(() => generateSlideAudio(deckId, slideNumber)),
+  ipcMain.handle(
+    "tts:generate-slide-audio",
+    (_event, deckId: string, slideNumber: number, mode: TranscriptMode) =>
+      api(() => generateSlideAudio(deckId, slideNumber, mode)),
   );
-  ipcMain.handle("tts:generate-deck-audio", (_event, deckId: string) =>
-    api(() => generateDeckAudio(deckId)),
+  ipcMain.handle("tts:generate-deck-audio", (_event, deckId: string, mode: TranscriptMode) =>
+    api(() => generateDeckAudio(deckId, mode)),
   );
-  ipcMain.handle("tts:get-slide-audio-bytes", (_event, deckId: string, slideNumber: number) =>
-    api(() => getSlideAudioBytes(deckId, slideNumber)),
+  ipcMain.handle(
+    "tts:get-slide-audio-bytes",
+    (_event, deckId: string, slideNumber: number, mode: TranscriptMode) =>
+      api(() => getSlideAudioBytes(deckId, slideNumber, mode)),
   );
   ipcMain.handle("settings:get", () => api(() => getSettings()));
   ipcMain.handle("settings:save", (_event, settings: AppSettings) =>
@@ -810,13 +1055,37 @@ function registerIpc(mainWindow: BrowserWindow) {
   );
 }
 
+function resolveAppIcon() {
+  // __dirname is <root>/dist-electron/electron in dev and inside the asar when packaged.
+  const roots = [
+    path.join(__dirname, "..", ".."),
+    app.getAppPath(),
+    process.cwd(),
+    process.resourcesPath ?? "",
+  ];
+  const names = ["icon.ico", "icon.png"];
+
+  for (const root of roots) {
+    if (!root) continue;
+    for (const name of names) {
+      const candidate = path.join(root, "assets", name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+
+  return undefined;
+}
+
 async function createWindow() {
+  const appIcon = resolveAppIcon();
+
   const mainWindow = new BrowserWindow({
     width: 1320,
     height: 900,
     minWidth: 1024,
     minHeight: 720,
     backgroundColor: "#f6f7f4",
+    ...(appIcon ? { icon: appIcon } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -837,6 +1106,10 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (process.platform === "win32") {
+    app.setAppUserModelId("com.slidetutor.desktop");
+  }
+
   await ensureDir(dataRoot());
   await createWindow();
 

@@ -103,7 +103,9 @@ function extractTitle(block: string, slideNumber: number) {
   return `Slide ${slideNumber}`;
 }
 
-function parseBlock(block: string, slideNumber: number) {
+type ParseBlockResult = { error: string } | { slide: ImportedSlideParsed };
+
+function parseBlock(block: string, slideNumber: number): ParseBlockResult {
   const trimmed = block.trim();
   if (!trimmed) {
     return { error: `Slide ${slideNumber} is empty.` };

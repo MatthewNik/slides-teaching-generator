@@ -38,14 +38,22 @@ import type {
   DeckManifest,
   DeckSummary,
   SlideTranscript,
+  SlideTranscriptVariant,
 } from "@/lib/types";
+import {
+  DEFAULT_TRANSCRIPT_MODE,
+  TRANSCRIPT_MODE_PRESETS,
+  type TranscriptMode,
+} from "@/lib/transcriptModes";
 import type { ImportedSlideInput } from "@/lib/schemas";
 import type { SlideUpdate } from "@/types/electron";
 import { ExternalTranscriptImport } from "./ExternalTranscriptImport";
+import { LocalLibraryDropZone } from "./LocalLibraryDropZone";
 import { useAutoDismissMessage } from "@/hooks/useAutoDismissMessage";
 import { MarkdownTranscript } from "./MarkdownTranscript";
 import { PdfSlide } from "./PdfSlide";
 import { SpeechControls, type SpeechControlsHandle } from "./SpeechControls";
+import { TranscriptModeMenu } from "./TranscriptModeMenu";
 import { VoiceSpeedMenu } from "./VoiceSpeedMenu";
 
 type ViewMode = "library" | "editor" | "viewer" | "settings";
@@ -61,7 +69,42 @@ const DEFAULT_SETTINGS: AppSettings = {
   viewerShowTranscript: true,
   viewerAutoplayAudio: false,
   transcriptMathMode: "conservative",
+  transcriptMode: DEFAULT_TRANSCRIPT_MODE,
 };
+
+function emptyVariant(): SlideTranscriptVariant {
+  return {
+    transcriptMarkdown: "",
+    transcriptLatex: "",
+    speechText: "",
+    keyTerms: [],
+    generationStatus: "draft",
+  };
+}
+
+function resolveVariant(
+  slide: SlideTranscript,
+  mode: TranscriptMode,
+): SlideTranscriptVariant | null {
+  const variant = slide.transcriptsByMode?.[mode];
+  if (variant) return variant;
+
+  // Backward compatibility: treat a legacy top-level transcript as the summary mode.
+  if (mode === DEFAULT_TRANSCRIPT_MODE && slide.transcriptMarkdown.trim()) {
+    return {
+      transcriptMarkdown: slide.transcriptMarkdown,
+      transcriptLatex: slide.transcriptLatex,
+      speechText: slide.speechText,
+      keyTerms: slide.keyTerms,
+      generationStatus: slide.generationStatus,
+      audioPath: slide.audioPath,
+      ttsStatus: slide.ttsStatus,
+      ttsError: slide.ttsError,
+    };
+  }
+
+  return null;
+}
 
 function desktopApi() {
   if (!window.slideTutor) {
@@ -168,9 +211,37 @@ function PdfFromDeck({
   );
 }
 
+function SavedAudioBadge() {
+  const [phase, setPhase] = useState<"visible" | "fading" | "gone">("visible");
+
+  useEffect(() => {
+    const fadeTimer = window.setTimeout(() => setPhase("fading"), 3000);
+    const hideTimer = window.setTimeout(() => setPhase("gone"), 3500);
+
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(hideTimer);
+    };
+  }, []);
+
+  if (phase === "gone") return null;
+
+  return (
+    <span
+      className={`shrink-0 text-sm text-zinc-600 transition-opacity duration-500 ${
+        phase === "visible" ? "opacity-100" : "opacity-0"
+      }`}
+    >
+      Saved audio
+    </span>
+  );
+}
+
 function DesktopAudioControls({
   deck,
   slide,
+  variant,
+  mode,
   voiceRate,
   autoplay,
   onVoiceRateChange,
@@ -180,6 +251,8 @@ function DesktopAudioControls({
 }: {
   deck: DeckManifest;
   slide: SlideTranscript;
+  variant: SlideTranscriptVariant | null;
+  mode: TranscriptMode;
   voiceRate: number;
   autoplay: boolean;
   onVoiceRateChange: (rate: number) => void;
@@ -187,6 +260,8 @@ function DesktopAudioControls({
   onDeckChanged: (deck: DeckManifest) => void;
   onMessage: (text: string, options?: { isError?: boolean }) => void;
 }) {
+  const speechText = variant?.speechText ?? "";
+  const variantAudioPath = variant?.audioPath;
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const speechRef = useRef<SpeechControlsHandle | null>(null);
   const userStoppedRef = useRef(false);
@@ -196,19 +271,17 @@ function DesktopAudioControls({
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [showSavedBadge, setShowSavedBadge] = useState(false);
-  const [savedBadgeVisible, setSavedBadgeVisible] = useState(false);
 
   const playLabel = isPaused ? "Resume" : "Play";
 
   const handleSpeechPlaybackChange = useCallback(
     (playing: boolean, paused: boolean) => {
-      if (!audioUrl && !slide.audioPath) {
+      if (!audioUrl && !variantAudioPath) {
         setIsPlaying(playing);
         setIsPaused(paused);
       }
     },
-    [audioUrl, slide.audioPath],
+    [audioUrl, variantAudioPath],
   );
 
   useEffect(() => {
@@ -223,20 +296,20 @@ function DesktopAudioControls({
     const resetTimer = window.setTimeout(() => {
       setAudioUrl("");
       setAudioLoadFailed(false);
-      setIsLoadingAudio(Boolean(slide.audioPath));
+      setIsLoadingAudio(Boolean(variantAudioPath));
       setIsPlaying(false);
       setIsPaused(false);
       userStoppedRef.current = false;
     }, 0);
 
     async function loadAudio() {
-      if (!slide.audioPath) {
+      if (!variantAudioPath) {
         setAudioLoadFailed(false);
         setIsLoadingAudio(false);
         return;
       }
 
-      const result = await desktopApi().getSlideAudioBytes(deck.id, slide.slideNumber);
+      const result = await desktopApi().getSlideAudioBytes(deck.id, slide.slideNumber, mode);
 
       if (!result.ok) {
         setAudioLoadFailed(true);
@@ -268,26 +341,7 @@ function DesktopAudioControls({
       window.clearTimeout(resetTimer);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [deck.id, onMessage, slide.audioPath, slide.slideNumber]);
-
-  useEffect(() => {
-    if (!audioUrl) {
-      setShowSavedBadge(false);
-      setSavedBadgeVisible(false);
-      return;
-    }
-
-    setShowSavedBadge(true);
-    setSavedBadgeVisible(true);
-
-    const fadeTimer = window.setTimeout(() => setSavedBadgeVisible(false), 3000);
-    const hideTimer = window.setTimeout(() => setShowSavedBadge(false), 3500);
-
-    return () => {
-      window.clearTimeout(fadeTimer);
-      window.clearTimeout(hideTimer);
-    };
-  }, [audioUrl]);
+  }, [deck.id, mode, onMessage, slide.slideNumber, variantAudioPath]);
 
   useEffect(() => {
     if (!autoplay || userStoppedRef.current) return;
@@ -307,7 +361,7 @@ function DesktopAudioControls({
       return;
     }
 
-    if (!audioUrl && !isLoadingAudio && slide.speechText.trim() && !slide.audioPath) {
+    if (!audioUrl && !isLoadingAudio && speechText.trim() && !variantAudioPath) {
       const timer = window.setTimeout(() => {
         speechRef.current?.play();
         setIsPlaying(true);
@@ -318,14 +372,14 @@ function DesktopAudioControls({
     }
 
     return undefined;
-  }, [audioUrl, autoplay, deck.id, isLoadingAudio, onMessage, slide.audioPath, slide.slideNumber, slide.speechText]);
+  }, [audioUrl, autoplay, deck.id, isLoadingAudio, onMessage, slide.slideNumber, speechText, variantAudioPath]);
 
   async function generateDeckAudio() {
     setIsGeneratingDeck(true);
-    onMessage("Generating Piper audio for all slides...");
+    onMessage(`Generating Piper audio for all slides (${TRANSCRIPT_MODE_PRESETS[mode].label})...`);
 
     try {
-      const result = await desktopApi().generateDeckAudio(deck.id);
+      const result = await desktopApi().generateDeckAudio(deck.id, mode);
 
       if (!result.ok) throw new Error(result.error);
 
@@ -343,7 +397,7 @@ function DesktopAudioControls({
   function handlePlay() {
     userStoppedRef.current = false;
 
-    if (slide.audioPath && !audioUrl) {
+    if (variantAudioPath && !audioUrl) {
       onMessage(
         audioLoadFailed
           ? "Saved audio could not be loaded. Regenerate slide audio."
@@ -366,7 +420,7 @@ function DesktopAudioControls({
       return;
     }
 
-    if (!slide.audioPath) {
+    if (!variantAudioPath) {
       speechRef.current?.play();
       setIsPlaying(true);
       setIsPaused(false);
@@ -401,8 +455,8 @@ function DesktopAudioControls({
     <div className="flex max-w-full flex-nowrap items-center gap-2 overflow-x-auto overflow-y-visible">
       <SpeechControls
         ref={speechRef}
-        text={slide.speechText}
-        slideKey={`${deck.id}-${slide.slideNumber}`}
+        text={speechText}
+        slideKey={`${deck.id}-${slide.slideNumber}-${mode}`}
         rate={voiceRate}
         onError={(error) => onMessage(error, { isError: true })}
         onPlaybackChange={handleSpeechPlaybackChange}
@@ -412,7 +466,7 @@ function DesktopAudioControls({
       {audioUrl ? (
         <audio
           ref={audioRef}
-          key={audioUrl}
+          key={`audio-${audioUrl}`}
           src={audioUrl}
           className="hidden"
           onPlay={() => {
@@ -438,7 +492,7 @@ function DesktopAudioControls({
       <button
         type="button"
         onClick={handlePlay}
-        disabled={!slide.speechText.trim() || isLoadingAudio}
+        disabled={!speechText.trim() || isLoadingAudio}
         aria-label={playLabel}
         title={playLabel}
         className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent text-white hover:bg-accent-strong"
@@ -493,17 +547,9 @@ function DesktopAudioControls({
       {isLoadingAudio ? (
         <span className="shrink-0 text-sm text-zinc-600">Loading...</span>
       ) : null}
-      {showSavedBadge ? (
-        <span
-          className={`shrink-0 text-sm text-zinc-600 transition-opacity duration-500 ${
-            savedBadgeVisible ? "opacity-100" : "opacity-0"
-          }`}
-        >
-          Saved audio
-        </span>
-      ) : null}
-      {slide.ttsStatus === "error" && slide.ttsError ? (
-        <span className="shrink-0 text-sm text-red-600">{slide.ttsError}</span>
+      {audioUrl ? <SavedAudioBadge key={`saved-${audioUrl}`} /> : null}
+      {variant?.ttsStatus === "error" && variant.ttsError ? (
+        <span className="shrink-0 text-sm text-red-600">{variant.ttsError}</span>
       ) : null}
     </div>
   );
@@ -524,9 +570,12 @@ export function DesktopApp() {
   const [editingDeckTitle, setEditingDeckTitle] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [zoomPage, setZoomPage] = useState<number | null>(null);
-  const [zoomScale, setZoomScale] = useState(1.35);
+  const [zoomScale, setZoomScale] = useState(1);
 
   const activeSlide = activeDeck?.slides[activeSlideIndex];
+  const transcriptMode = settings.transcriptMode;
+  const activeVariant = activeSlide ? resolveVariant(activeSlide, transcriptMode) : null;
+  const activeModePreset = TRANSCRIPT_MODE_PRESETS[transcriptMode];
 
   const isElectron = isMounted && Boolean(window.slideTutor);
 
@@ -537,7 +586,7 @@ export function DesktopApp() {
 
     if (result.ok) setDecks(result.data);
     else showMessage(result.error, { isError: true });
-  }, []);
+  }, [showMessage]);
 
   const loadFolders = useCallback(async () => {
     if (!window.slideTutor) return;
@@ -546,7 +595,7 @@ export function DesktopApp() {
 
     if (result.ok) setFolders(result.data);
     else showMessage(result.error, { isError: true });
-  }, []);
+  }, [showMessage]);
 
   const loadSettings = useCallback(async () => {
     if (!window.slideTutor) return;
@@ -555,7 +604,7 @@ export function DesktopApp() {
 
     if (result.ok) setSettings(result.data);
     else showMessage(result.error, { isError: true });
-  }, []);
+  }, [showMessage]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setIsMounted(true), 0);
@@ -627,6 +676,31 @@ export function DesktopApp() {
       setActiveSlideIndex(0);
       setView("editor");
       await loadDecks();
+    } catch (error) {
+      showMessage(error instanceof Error ? error.message : "Could not import PDF.", { isError: true });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function importPdfFromDrop(file: File) {
+    if (!window.slideTutor) {
+      showMessage("Drag-and-drop import is only available in the desktop app.", { isError: true });
+      return;
+    }
+
+    setIsBusy(true);
+    showMessage("");
+
+    try {
+      const sourcePath = desktopApi().getPathForFile(file);
+      const result = await desktopApi().createDeckFromPdfPath(sourcePath, newDeckTitle);
+
+      if (!result.ok) throw new Error(result.error);
+
+      setNewDeckTitle("");
+      await loadDecks();
+      showMessage(`Imported "${result.data.title}" to Unfiled.`);
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "Could not import PDF.", { isError: true });
     } finally {
@@ -724,18 +798,21 @@ export function DesktopApp() {
   async function generateTranscripts() {
     if (!activeDeck) return;
 
+    const mode = settings.transcriptMode;
+    const presetLabel = TRANSCRIPT_MODE_PRESETS[mode].label;
+
     setIsBusy(true);
-    showMessage("Generating transcripts with Gemini...");
+    showMessage(`Generating ${presetLabel} transcripts with Gemini...`);
 
     try {
-      const result = await desktopApi().generateTranscripts(activeDeck.id);
+      const result = await desktopApi().generateTranscripts(activeDeck.id, mode);
 
       if (!result.ok) throw new Error(result.error);
 
       setActiveDeck(result.data);
       setEditingDeckTitle(result.data.title);
       setActiveSlideIndex(0);
-      showMessage("Transcripts generated. Review and edit before publishing.");
+      showMessage(`${presetLabel} transcripts generated. Review and edit before publishing.`);
       await loadDecks();
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "Could not generate transcripts.", { isError: true });
@@ -788,26 +865,64 @@ export function DesktopApp() {
     }
   }
 
-  function updateLocalSlide(update: Partial<SlideTranscript>) {
+  function updateLocalSlideTitle(title: string) {
     if (!activeDeck || !activeSlide) return;
 
     setActiveDeck({
       ...activeDeck,
       slides: activeDeck.slides.map((slide) =>
-        slide.slideNumber === activeSlide.slideNumber ? { ...slide, ...update } : slide,
+        slide.slideNumber === activeSlide.slideNumber ? { ...slide, title } : slide,
       ),
+    });
+  }
+
+  function updateLocalVariant(patch: Partial<SlideTranscriptVariant>) {
+    if (!activeDeck || !activeSlide) return;
+
+    const mode = settings.transcriptMode;
+
+    setActiveDeck({
+      ...activeDeck,
+      slides: activeDeck.slides.map((slide) => {
+        if (slide.slideNumber !== activeSlide.slideNumber) return slide;
+
+        const current = resolveVariant(slide, mode) ?? emptyVariant();
+        const nextVariant: SlideTranscriptVariant = { ...current, ...patch };
+        const byMode = { ...(slide.transcriptsByMode ?? {}), [mode]: nextVariant };
+        const next: SlideTranscript = { ...slide, transcriptsByMode: byMode };
+
+        if (mode === DEFAULT_TRANSCRIPT_MODE) {
+          next.transcriptMarkdown = nextVariant.transcriptMarkdown;
+          next.transcriptLatex = nextVariant.transcriptLatex;
+          next.speechText = nextVariant.speechText;
+          next.keyTerms = nextVariant.keyTerms;
+        }
+
+        return next;
+      }),
     });
   }
 
   async function saveActiveSlide() {
     if (!activeDeck || !activeSlide) return;
 
+    const mode = settings.transcriptMode;
+    const variant = resolveVariant(activeSlide, mode);
+
+    if (!variant || !variant.transcriptMarkdown.trim() || !variant.speechText.trim()) {
+      showMessage(
+        `Generate a ${TRANSCRIPT_MODE_PRESETS[mode].label} transcript for this slide before saving.`,
+        { isError: true },
+      );
+      return;
+    }
+
     const update: SlideUpdate = {
       title: activeSlide.title,
-      transcriptMarkdown: activeSlide.transcriptMarkdown,
-      transcriptLatex: activeSlide.transcriptLatex,
-      speechText: activeSlide.speechText,
-      keyTerms: activeSlide.keyTerms,
+      transcriptMarkdown: variant.transcriptMarkdown,
+      transcriptLatex: variant.transcriptLatex || variant.transcriptMarkdown,
+      speechText: variant.speechText,
+      keyTerms: variant.keyTerms,
     };
 
     setIsBusy(true);
@@ -818,6 +933,7 @@ export function DesktopApp() {
         activeDeck.id,
         activeSlide.slideNumber,
         update,
+        mode,
       );
 
       if (!result.ok) throw new Error(result.error);
@@ -938,6 +1054,64 @@ export function DesktopApp() {
     [settings.viewerShowSlideList, settings.viewerShowTranscript],
   );
 
+  useEffect(() => {
+    if (view !== "viewer" || !activeDeck) return;
+
+    const slideCount = activeDeck.slides.length;
+    if (slideCount === 0) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented) return;
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          target.isContentEditable ||
+          target.closest('[role="listbox"]')
+        ) {
+          return;
+        }
+      }
+
+      event.preventDefault();
+
+      if (event.key === "ArrowRight") {
+        setActiveSlideIndex((current) => Math.min(slideCount - 1, current + 1));
+      } else {
+        setActiveSlideIndex((current) => Math.max(0, current - 1));
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [view, activeDeck]);
+
+  useEffect(() => {
+    if (!zoomPage) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setZoomPage(null);
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [zoomPage]);
+
+  const shellMaxWidth =
+    view === "viewer"
+      ? "max-w-[1760px]"
+      : view === "editor"
+        ? "max-w-[1600px]"
+        : "max-w-7xl";
+
   const decksByFolder = useMemo(() => {
     const map = new Map<string, DeckSummary[]>();
     for (const deck of decks) {
@@ -958,19 +1132,26 @@ export function DesktopApp() {
   }
 
   return (
-    <main className="min-h-screen bg-background px-5 py-5 text-foreground">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
+    <main className="min-h-screen bg-background px-4 py-4 text-foreground sm:px-5 sm:py-5">
+      <div className={`mx-auto flex w-full flex-col gap-5 ${shellMaxWidth}`}>
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
-          <h1 className="text-xl font-semibold">
-            <span className="text-accent">Slide Tutor Desktop</span>
-            <span className="mx-2 text-zinc-400">·</span>
-            <span className="text-base font-normal text-zinc-600">Local PDF slide lessons</span>
+          <h1 className="flex items-baseline gap-2 text-xl font-semibold">
+            <span className="text-accent">Slide Tutor</span>
+            <span className="hidden text-zinc-400 sm:inline">·</span>
+            <span className="hidden text-base font-normal text-zinc-600 sm:inline">
+              Local PDF slide lessons
+            </span>
           </h1>
           <nav className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => setView("library")}
-              className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
+              aria-current={view === "library" || view === "editor" || view === "viewer"}
+              className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition-colors ${
+                view === "library"
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-line bg-panel hover:bg-panel-muted"
+              }`}
             >
               <Library size={17} />
               Library
@@ -978,7 +1159,12 @@ export function DesktopApp() {
             <button
               type="button"
               onClick={() => setView("settings")}
-              className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
+              aria-current={view === "settings"}
+              className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition-colors ${
+                view === "settings"
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-line bg-panel hover:bg-panel-muted"
+              }`}
             >
               <Settings size={17} />
               Settings
@@ -1053,9 +1239,17 @@ export function DesktopApp() {
               </div>
             </div>
 
-            <section className="rounded-lg border border-line bg-panel">
+            <LocalLibraryDropZone
+              isElectron={isElectron}
+              isBusy={isBusy}
+              onDropPdf={(file) => void importPdfFromDrop(file)}
+              onMessage={showMessage}
+            >
               <div className="flex items-center justify-between border-b border-line p-5">
-                <h2 className="text-lg font-semibold">Local Library</h2>
+                <div>
+                  <h2 className="text-lg font-semibold">Local Library</h2>
+                  <p className="mt-0.5 text-sm text-zinc-600">Drag a PDF here to import</p>
+                </div>
                 <button
                   type="button"
                   onClick={() => {
@@ -1068,11 +1262,18 @@ export function DesktopApp() {
                   Refresh
                 </button>
               </div>
-              <div className="max-h-[720px] overflow-auto">
+              <div className="scroll-area max-h-[min(720px,calc(100vh-260px))] overflow-auto">
                 {decks.length === 0 ? (
-                  <p className="p-5 text-sm text-zinc-600">
-                    No local decks yet. Import a PDF to start.
-                  </p>
+                  <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-panel-muted text-accent">
+                      <BookOpen size={26} />
+                    </div>
+                    <p className="text-sm font-semibold text-zinc-700">No decks yet</p>
+                    <p className="max-w-xs text-sm text-zinc-600">
+                      Import a PDF on the left or drag one onto this library panel to create
+                      your first deck, then generate transcripts and study with narrated slides.
+                    </p>
+                  </div>
                 ) : (
                   [
                     ...folders.map((folder) => ({ id: folder.id, name: folder.name })),
@@ -1093,14 +1294,16 @@ export function DesktopApp() {
                           folderDecks.map((deck) => (
                             <div
                               key={deck.id}
-                              className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                              className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-panel-muted/50"
                             >
                               <div className="flex min-w-0 items-center gap-3">
-                                <FileText className="shrink-0 text-accent" size={22} />
+                                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-muted text-accent">
+                                  <FileText size={18} />
+                                </span>
                                 <div className="min-w-0">
                                   <h3 className="truncate font-semibold">{deck.title}</h3>
                                   <p className="text-sm text-zinc-600">
-                                    {deck.slideCount} slides - {statusText(deck)}
+                                    {deck.slideCount} slides · {statusText(deck)}
                                   </p>
                                 </div>
                               </div>
@@ -1152,15 +1355,25 @@ export function DesktopApp() {
                   })
                 )}
               </div>
-            </section>
+            </LocalLibraryDropZone>
           </section>
         ) : null}
 
         {view === "settings" ? (
-          <section className="max-w-4xl rounded-lg border border-line bg-panel p-5">
-            <h2 className="text-xl font-semibold">Settings</h2>
-            <div className="mt-5 grid gap-4">
-              <label className="grid gap-2 text-sm font-medium">
+          <section className="grid max-w-3xl gap-5">
+            <div>
+              <h2 className="text-xl font-semibold">Settings</h2>
+              <p className="mt-1 text-sm text-zinc-600">
+                Stored locally on this device. Keys are only used when you generate content.
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-line bg-panel p-5">
+              <h3 className="text-base font-semibold">AI transcripts</h3>
+              <p className="mt-1 text-sm text-zinc-600">
+                Used by Gemini to generate teaching notes from your slides.
+              </p>
+              <label className="mt-4 grid gap-2 text-sm font-medium">
                 Gemini API key
                 <input
                   value={settings.geminiApiKey}
@@ -1168,68 +1381,90 @@ export function DesktopApp() {
                     setSettings({ ...settings, geminiApiKey: event.target.value })
                   }
                   type="password"
+                  placeholder="AIza..."
                   className="h-11 rounded-md border border-line bg-white px-3 outline-none focus:border-accent"
                 />
               </label>
-              <p className="text-sm text-zinc-600">
-                Piper defaults to the bundled <code className="font-mono">piper/en_US-john-medium.onnx</code>{" "}
+
+              <div className="mt-4 grid gap-2 text-sm font-medium">
+                <span>Transcript generation mode</span>
+                <TranscriptModeMenu
+                  value={settings.transcriptMode}
+                  onChange={(mode) => persistSettings({ ...settings, transcriptMode: mode })}
+                />
+                <p className="text-sm font-normal text-zinc-600">
+                  {TRANSCRIPT_MODE_PRESETS[settings.transcriptMode].description} Transcripts are
+                  saved separately per mode, so switching modes never overwrites another mode.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-line bg-panel p-5">
+              <h3 className="text-base font-semibold">Narration (Piper)</h3>
+              <p className="mt-1 text-sm text-zinc-600">
+                Defaults to the bundled <code className="font-mono">piper/en_US-john-medium.onnx</code>{" "}
                 voice. Leave paths blank to use it with <code className="font-mono">python -m piper</code> or an
                 optional <code className="font-mono">piper.exe</code> in that folder.
               </p>
-              <label className="grid gap-2 text-sm font-medium">
-                Piper executable (optional)
-                <div className="flex gap-2">
-                  <input
-                    value={settings.piperExecutablePath}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        piperExecutablePath: event.target.value,
-                      })
-                    }
-                    className="h-11 flex-1 rounded-md border border-line bg-white px-3 outline-none focus:border-accent"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => choosePath("exe")}
-                    className="h-11 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
-                  >
-                    Browse
-                  </button>
-                </div>
-              </label>
-              <label className="grid gap-2 text-sm font-medium">
-                Piper voice model (.onnx, optional)
-                <div className="flex gap-2">
-                  <input
-                    value={settings.piperVoiceModelPath}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        piperVoiceModelPath: event.target.value,
-                      })
-                    }
-                    className="h-11 flex-1 rounded-md border border-line bg-white px-3 outline-none focus:border-accent"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => choosePath("voice")}
-                    className="h-11 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
-                  >
-                    Browse
-                  </button>
-                </div>
-              </label>
-              <button
-                type="button"
-                onClick={saveAppSettings}
-                disabled={!isElectron || isBusy}
-                className="inline-flex h-11 w-fit items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-strong"
-              >
-                <Save size={18} />
-                Save Settings
-              </button>
+              <div className="mt-4 grid gap-4">
+                <label className="grid gap-2 text-sm font-medium">
+                  Piper executable (optional)
+                  <div className="flex gap-2">
+                    <input
+                      value={settings.piperExecutablePath}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          piperExecutablePath: event.target.value,
+                        })
+                      }
+                      placeholder="Leave blank to use the bundled voice"
+                      className="h-11 min-w-0 flex-1 rounded-md border border-line bg-white px-3 outline-none focus:border-accent"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => choosePath("exe")}
+                      className="h-11 shrink-0 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
+                    >
+                      Browse
+                    </button>
+                  </div>
+                </label>
+                <label className="grid gap-2 text-sm font-medium">
+                  Piper voice model (.onnx, optional)
+                  <div className="flex gap-2">
+                    <input
+                      value={settings.piperVoiceModelPath}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          piperVoiceModelPath: event.target.value,
+                        })
+                      }
+                      placeholder="Leave blank to use the bundled voice"
+                      className="h-11 min-w-0 flex-1 rounded-md border border-line bg-white px-3 outline-none focus:border-accent"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => choosePath("voice")}
+                      className="h-11 shrink-0 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
+                    >
+                      Browse
+                    </button>
+                  </div>
+                </label>
+              </div>
             </div>
+
+            <button
+              type="button"
+              onClick={saveAppSettings}
+              disabled={!isElectron || isBusy}
+              className="inline-flex h-11 w-fit items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-strong"
+            >
+              <Save size={18} />
+              Save Settings
+            </button>
           </section>
         ) : null}
 
@@ -1239,7 +1474,7 @@ export function DesktopApp() {
               <div className="border-b border-line p-3 text-sm font-semibold">
                 {statusText(activeDeck)}
               </div>
-              <div className="max-h-[720px] overflow-auto">
+              <div className="scroll-area max-h-[min(720px,calc(100vh-220px))] overflow-auto">
                 {activeDeck.slides.length === 0 ? (
                   <p className="p-4 text-sm text-zinc-600">
                     No transcripts yet. Generate with Gemini or import from an external LLM.
@@ -1250,12 +1485,17 @@ export function DesktopApp() {
                       key={item.slideNumber}
                       type="button"
                       onClick={() => setActiveSlideIndex(index)}
-                      className={`block w-full border-b border-line px-3 py-3 text-left text-sm hover:bg-panel-muted ${
-                        index === activeSlideIndex ? "bg-panel-muted font-semibold" : ""
+                      aria-current={index === activeSlideIndex}
+                      className={`block w-full border-b border-line px-3 py-2.5 text-left text-sm transition-colors hover:bg-panel-muted ${
+                        index === activeSlideIndex
+                          ? "border-l-2 border-l-accent bg-panel-muted font-semibold"
+                          : "border-l-2 border-l-transparent"
                       }`}
                     >
-                      Slide {item.slideNumber}
-                      <span className="mt-1 block truncate text-zinc-600">
+                      <span className={index === activeSlideIndex ? "text-accent" : "text-zinc-500"}>
+                        Slide {item.slideNumber}
+                      </span>
+                      <span className="mt-0.5 block truncate text-zinc-600">
                         {item.title}
                       </span>
                     </button>
@@ -1333,10 +1573,27 @@ export function DesktopApp() {
                       ))}
                     </select>
                   </label>
+                  <div className="flex items-center gap-2">
+                    <span>Transcript mode</span>
+                    <div className="w-56">
+                      <TranscriptModeMenu
+                        compact
+                        value={settings.transcriptMode}
+                        onChange={(mode) =>
+                          persistSettings({ ...settings, transcriptMode: mode })
+                        }
+                      />
+                    </div>
+                  </div>
                 </div>
+                <p className="text-sm text-zinc-600">
+                  Generate creates <span className="font-semibold">{activeModePreset.label}</span>{" "}
+                  transcripts for every slide. Other modes are kept separately.
+                </p>
               </div>
 
               <ExternalTranscriptImport
+                key={activeDeck.id}
                 deck={activeDeck}
                 isBusy={isBusy}
                 onImport={importExternalTranscripts}
@@ -1351,12 +1608,17 @@ export function DesktopApp() {
                 />
                 {activeSlide ? (
                   <div className="rounded-lg border border-line bg-panel">
-                    <div className="flex items-center justify-between border-b border-line p-4">
-                      <h2 className="text-lg font-semibold">Review script</h2>
+                    <div className="flex items-center justify-between gap-3 border-b border-line p-4">
+                      <div className="min-w-0">
+                        <h2 className="text-lg font-semibold">Review script</h2>
+                        <p className="text-xs text-zinc-500">
+                          Editing {activeModePreset.label} transcript
+                        </p>
+                      </div>
                       <button
                         type="button"
                         onClick={saveActiveSlide}
-                        disabled={isBusy}
+                        disabled={isBusy || !activeVariant}
                         className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-white hover:bg-accent-strong"
                       >
                         <Save size={17} />
@@ -1368,58 +1630,83 @@ export function DesktopApp() {
                         Title
                         <input
                           value={activeSlide.title}
-                          onChange={(event) =>
-                            updateLocalSlide({ title: event.target.value })
-                          }
+                          onChange={(event) => updateLocalSlideTitle(event.target.value)}
                           className="h-10 rounded-md border border-line px-3 outline-none focus:border-accent"
                         />
                       </label>
-                      <label className="grid gap-2 text-sm font-medium">
-                        Transcript Markdown with LaTeX
-                        <textarea
-                          value={activeSlide.transcriptMarkdown}
-                          onChange={(event) =>
-                            updateLocalSlide({
-                              transcriptMarkdown: event.target.value,
-                            })
-                          }
-                          className="min-h-[9rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
-                        />
-                      </label>
-                      <label className="grid gap-2 text-sm font-medium">
-                        Speech text
-                        <textarea
-                          value={activeSlide.speechText}
-                          onChange={(event) =>
-                            updateLocalSlide({ speechText: event.target.value })
-                          }
-                          rows={5}
-                          className="min-h-[5rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
-                        />
-                      </label>
-                      <label className="grid gap-2 text-sm font-medium">
-                        Key terms, comma separated
-                        <input
-                          value={activeSlide.keyTerms.join(", ")}
-                          onChange={(event) =>
-                            updateLocalSlide({
-                              keyTerms: event.target.value
-                                .split(",")
-                                .map((term) => term.trim())
-                                .filter(Boolean),
-                            })
-                          }
-                          className="h-10 rounded-md border border-line px-3 outline-none focus:border-accent"
-                        />
-                      </label>
-                      <div className="rounded-md border border-line bg-panel-muted p-4">
-                        <p className="mb-2 text-sm font-semibold">Preview</p>
-                        <MarkdownTranscript
-                          markdown={activeSlide.transcriptMarkdown}
-                          latex={activeSlide.transcriptLatex}
-                          mathMode={settings.transcriptMathMode}
-                        />
-                      </div>
+
+                      {activeVariant ? (
+                        <>
+                          <label className="grid gap-2 text-sm font-medium">
+                            Transcript Markdown with LaTeX
+                            <textarea
+                              value={activeVariant.transcriptMarkdown}
+                              onChange={(event) =>
+                                updateLocalVariant({
+                                  transcriptMarkdown: event.target.value,
+                                  transcriptLatex: event.target.value,
+                                })
+                              }
+                              className="min-h-[9rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
+                            />
+                          </label>
+                          <label className="grid gap-2 text-sm font-medium">
+                            Speech text
+                            <textarea
+                              value={activeVariant.speechText}
+                              onChange={(event) =>
+                                updateLocalVariant({ speechText: event.target.value })
+                              }
+                              rows={5}
+                              className="min-h-[5rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
+                            />
+                          </label>
+                          <label className="grid gap-2 text-sm font-medium">
+                            Key terms, comma separated
+                            <input
+                              value={activeVariant.keyTerms.join(", ")}
+                              onChange={(event) =>
+                                updateLocalVariant({
+                                  keyTerms: event.target.value
+                                    .split(",")
+                                    .map((term) => term.trim())
+                                    .filter(Boolean),
+                                })
+                              }
+                              className="h-10 rounded-md border border-line px-3 outline-none focus:border-accent"
+                            />
+                          </label>
+                          <div className="rounded-md border border-line bg-panel-muted p-4">
+                            <p className="mb-2 text-sm font-semibold">Preview</p>
+                            <MarkdownTranscript
+                              markdown={activeVariant.transcriptMarkdown}
+                              latex={activeVariant.transcriptLatex}
+                              mathMode={settings.transcriptMathMode}
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-line bg-panel-muted px-6 py-10 text-center">
+                          <FileText className="text-zinc-400" size={28} />
+                          <p className="text-sm font-semibold text-zinc-700">
+                            No {activeModePreset.label} transcript yet
+                          </p>
+                          <p className="max-w-sm text-sm text-zinc-600">
+                            {activeModePreset.description} Use Generate above to create{" "}
+                            {activeModePreset.label} transcripts for this deck without touching
+                            other modes.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={generateTranscripts}
+                            disabled={isBusy}
+                            className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-strong"
+                          >
+                            <Wand2 size={17} />
+                            Generate {activeModePreset.label}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : null}
@@ -1430,44 +1717,68 @@ export function DesktopApp() {
 
         {view === "viewer" && activeDeck ? (
           <section className="flex h-[calc(100vh-110px)] min-h-0 flex-col gap-3">
-            <header className="shrink-0 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-panel p-4">
-              <div>
-                <h2 className="text-xl font-semibold">{activeDeck.title}</h2>
+            <header className="shrink-0 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-panel px-4 py-3">
+              <div className="min-w-0">
+                <h2 className="truncate text-lg font-semibold sm:text-xl">{activeDeck.title}</h2>
                 <p className="text-sm text-zinc-600">
-                  {slideCountLabel} - {folderName(folders, activeDeck.folderId)}
+                  {slideCountLabel} · {folderName(folders, activeDeck.folderId)}
                 </p>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateAutoSetting({
-                      viewerShowSlideList: !settings.viewerShowSlideList,
-                    })
-                  }
-                  className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
-                >
-                  <PanelLeft size={17} />
-                  Slide list
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    updateAutoSetting({
-                      viewerShowTranscript: !settings.viewerShowTranscript,
-                    })
-                  }
-                  className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
-                >
-                  <FileText size={17} />
-                  Transcript
-                </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-52">
+                  <TranscriptModeMenu
+                    compact
+                    ariaLabel="Transcript mode"
+                    value={settings.transcriptMode}
+                    onChange={(mode) => updateAutoSetting({ transcriptMode: mode })}
+                  />
+                </div>
+                <div className="flex items-center gap-1 rounded-lg border border-line bg-panel-muted p-1">
+                  <button
+                    type="button"
+                    aria-pressed={settings.viewerShowSlideList}
+                    title="Toggle slide list"
+                    onClick={() =>
+                      updateAutoSetting({
+                        viewerShowSlideList: !settings.viewerShowSlideList,
+                      })
+                    }
+                    className={`inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors ${
+                      settings.viewerShowSlideList
+                        ? "bg-panel text-accent shadow-sm"
+                        : "text-zinc-600 hover:bg-panel"
+                    }`}
+                  >
+                    <PanelLeft size={16} />
+                    <span className="hidden sm:inline">Slides</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={settings.viewerShowTranscript}
+                    title="Toggle transcript"
+                    onClick={() =>
+                      updateAutoSetting({
+                        viewerShowTranscript: !settings.viewerShowTranscript,
+                      })
+                    }
+                    className={`inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors ${
+                      settings.viewerShowTranscript
+                        ? "bg-panel text-accent shadow-sm"
+                        : "text-zinc-600 hover:bg-panel"
+                    }`}
+                  >
+                    <FileText size={16} />
+                    <span className="hidden sm:inline">Transcript</span>
+                  </button>
+                </div>
                 <button
                   type="button"
                   onClick={() => setView("editor")}
-                  className="h-10 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
+                  className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
                 >
-                  Edit scripts
+                  <Wand2 size={16} />
+                  <span className="hidden sm:inline">Edit scripts</span>
+                  <span className="sm:hidden">Edit</span>
                 </button>
               </div>
             </header>
@@ -1483,20 +1794,26 @@ export function DesktopApp() {
                     }`}
                   >
                     {settings.viewerShowSlideList ? (
-                      <aside className="min-h-0 overflow-auto rounded-lg border border-line bg-panel">
+                      <aside className="scroll-area min-h-0 overflow-auto rounded-lg border border-line bg-panel">
+                        <p className="sticky top-0 z-10 border-b border-line bg-panel/95 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 backdrop-blur">
+                          Slides
+                        </p>
                         {activeDeck.slides.map((slide, index) => (
                           <button
                             key={slide.slideNumber}
                             type="button"
                             onClick={() => setActiveSlideIndex(index)}
-                            className={`block w-full border-b border-line px-3 py-3 text-left text-sm hover:bg-panel-muted ${
+                            aria-current={index === activeSlideIndex}
+                            className={`block w-full border-b border-line px-3 py-2.5 text-left text-sm transition-colors hover:bg-panel-muted ${
                               index === activeSlideIndex
-                                ? "bg-panel-muted font-semibold"
-                                : ""
+                                ? "border-l-2 border-l-accent bg-panel-muted font-semibold"
+                                : "border-l-2 border-l-transparent"
                             }`}
                           >
-                            Slide {slide.slideNumber}
-                            <span className="mt-1 block truncate text-zinc-600">
+                            <span className={index === activeSlideIndex ? "text-accent" : "text-zinc-500"}>
+                              Slide {slide.slideNumber}
+                            </span>
+                            <span className="mt-0.5 block truncate text-zinc-600">
                               {slide.title}
                             </span>
                           </button>
@@ -1512,7 +1829,7 @@ export function DesktopApp() {
                           gridTemplateColumns: `${settings.viewerPdfPanePercent}% 10px minmax(0, 1fr)`,
                         }}
                       >
-                        <div className="min-h-0 min-w-0 overflow-auto pr-2">
+                        <div className="scroll-area min-h-0 min-w-0 overflow-auto pr-2">
                           <PdfFromDeck
                             deckId={activeDeck.id}
                             pageNumber={activeSlide.slideNumber}
@@ -1523,21 +1840,48 @@ export function DesktopApp() {
                           type="button"
                           aria-label="Resize PDF and transcript panes"
                           onPointerDown={startResize}
-                          className="h-full cursor-col-resize rounded-md bg-line hover:bg-accent"
-                        />
+                          className="group flex h-full cursor-col-resize items-center justify-center"
+                        >
+                          <span className="h-full w-1 rounded-full bg-line transition-colors group-hover:bg-accent" />
+                        </button>
                         <article className="ml-2 flex min-h-0 min-w-0 flex-col rounded-lg border border-line bg-panel">
-                          <div className="shrink-0 border-b border-line p-4">
-                            <p className="text-sm text-zinc-600">Transcript</p>
-                            <h2 className="mt-1 text-xl font-semibold tracking-normal">
+                          <div className="shrink-0 border-b border-line px-5 py-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                              Transcript · {activeModePreset.label}
+                            </p>
+                            <h2 className="mt-0.5 text-lg font-semibold tracking-normal">
                               {activeSlide.title}
                             </h2>
                           </div>
-                          <div className="min-h-0 flex-1 overflow-auto p-5">
-                            <MarkdownTranscript
-                              markdown={activeSlide.transcriptMarkdown}
-                              latex={activeSlide.transcriptLatex}
-                              mathMode={settings.transcriptMathMode}
-                            />
+                          <div className="scroll-area min-h-0 flex-1 overflow-auto px-5 py-5">
+                            {activeVariant ? (
+                              <div className="mx-auto w-full max-w-[72ch]">
+                                <MarkdownTranscript
+                                  markdown={activeVariant.transcriptMarkdown}
+                                  latex={activeVariant.transcriptLatex}
+                                  mathMode={settings.transcriptMathMode}
+                                />
+                              </div>
+                            ) : (
+                              <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-10 text-center">
+                                <FileText className="text-zinc-400" size={28} />
+                                <p className="text-sm font-semibold text-zinc-700">
+                                  No transcript generated for this mode yet.
+                                </p>
+                                <p className="text-sm text-zinc-600">
+                                  {activeModePreset.description} Open Edit scripts and generate the{" "}
+                                  {activeModePreset.label} transcript, or pick another mode above.
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() => setView("editor")}
+                                  className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-4 text-sm font-semibold hover:bg-panel-muted"
+                                >
+                                  <Wand2 size={16} />
+                                  Edit scripts
+                                </button>
+                              </div>
+                            )}
                           </div>
                         </article>
                       </div>
@@ -1546,7 +1890,7 @@ export function DesktopApp() {
                         className={
                           viewerImmersive
                             ? "flex h-full min-h-0 items-center justify-center"
-                            : "min-h-0 overflow-auto"
+                            : "scroll-area min-h-0 overflow-auto"
                         }
                       >
                         <PdfFromDeck
@@ -1579,6 +1923,8 @@ export function DesktopApp() {
                       <DesktopAudioControls
                         deck={activeDeck}
                         slide={activeSlide}
+                        variant={activeVariant}
+                        mode={transcriptMode}
                         voiceRate={settings.voiceRate}
                         autoplay={settings.viewerAutoplayAudio}
                         onVoiceRateChange={(rate) =>
@@ -1616,7 +1962,7 @@ export function DesktopApp() {
 
         {zoomPage && activeDeck ? (
           <div className="fixed inset-0 z-50 grid bg-black/70 p-5">
-            <div className="grid min-h-0 rounded-lg bg-background">
+            <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] rounded-lg bg-background">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-panel p-3">
                 <div className="text-sm font-semibold">
                   {activeDeck.title} - slide {zoomPage}
@@ -1640,7 +1986,7 @@ export function DesktopApp() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setZoomScale(1.35)}
+                    onClick={() => setZoomScale(1)}
                     className="inline-flex h-9 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
                   >
                     <RotateCcw size={16} />
@@ -1657,11 +2003,15 @@ export function DesktopApp() {
                 </div>
               </div>
               <div className="min-h-0 overflow-auto p-4">
-                <PdfFromDeck
-                  deckId={activeDeck.id}
-                  pageNumber={zoomPage}
-                  scaleMultiplier={zoomScale}
-                />
+                <div className="flex min-h-full min-w-full items-center justify-center">
+                  <PdfFromDeck
+                    deckId={activeDeck.id}
+                    pageNumber={zoomPage}
+                    fitMode="contain"
+                    scaleMultiplier={zoomScale}
+                    className="h-full w-full max-h-full border-0 bg-transparent"
+                  />
+                </div>
               </div>
             </div>
           </div>

@@ -1,18 +1,45 @@
+import type { TranscriptMode } from "./transcriptModes";
+
 export type DeckStatus = "draft" | "processing" | "ready" | "published" | "error";
 
 export type SlideGenerationStatus = "draft" | "generated" | "reviewed" | "error";
 
-export type SlideTranscript = {
-  slideNumber: number;
-  title: string;
+export type TtsStatus = "none" | "generating" | "ready" | "error";
+
+/**
+ * A single transcript variant for one slide in one transcript mode.
+ * Each mode (summary, conceptual, ...) stores its own variant so switching
+ * modes never overwrites another mode's content or audio.
+ */
+export type SlideTranscriptVariant = {
   transcriptMarkdown: string;
   transcriptLatex: string;
   speechText: string;
   keyTerms: string[];
   generationStatus: SlideGenerationStatus;
   audioPath?: string;
-  ttsStatus?: "none" | "generating" | "ready" | "error";
+  ttsStatus?: TtsStatus;
   ttsError?: string;
+};
+
+export type SlideTranscript = {
+  slideNumber: number;
+  title: string;
+  /**
+   * Legacy top-level transcript fields. Kept for backward compatibility and
+   * mirror the "summary" variant. New per-mode content lives in
+   * `transcriptsByMode`.
+   */
+  transcriptMarkdown: string;
+  transcriptLatex: string;
+  speechText: string;
+  keyTerms: string[];
+  generationStatus: SlideGenerationStatus;
+  audioPath?: string;
+  ttsStatus?: TtsStatus;
+  ttsError?: string;
+  /** Per-mode transcript variants. May be absent on older decks. */
+  transcriptsByMode?: Partial<Record<TranscriptMode, SlideTranscriptVariant>>;
 };
 
 export type DeckFolder = {
@@ -71,4 +98,5 @@ export type AppSettings = {
   viewerShowTranscript: boolean;
   viewerAutoplayAudio: boolean;
   transcriptMathMode: "conservative";
+  transcriptMode: TranscriptMode;
 };

@@ -6,6 +6,7 @@ import type {
   DeckSummary,
   SlideTranscript,
 } from "@/lib/types";
+import type { TranscriptMode } from "@/lib/transcriptModes";
 
 export type { ImportedSlideInput };
 
@@ -21,12 +22,21 @@ export type DesktopApiResult<T> =
 export type SlideTutorDesktopApi = {
   listDecks: () => Promise<DesktopApiResult<DeckSummary[]>>;
   choosePdfAndCreateDeck: (title: string) => Promise<DesktopApiResult<DeckManifest | null>>;
+  createDeckFromPdfPath: (
+    sourcePath: string,
+    title: string,
+  ) => Promise<DesktopApiResult<DeckManifest>>;
+  getPathForFile: (file: File) => string;
   getDeck: (deckId: string) => Promise<DesktopApiResult<DeckManifest>>;
-  generateTranscripts: (deckId: string) => Promise<DesktopApiResult<DeckManifest>>;
+  generateTranscripts: (
+    deckId: string,
+    mode: TranscriptMode,
+  ) => Promise<DesktopApiResult<DeckManifest>>;
   saveSlide: (
     deckId: string,
     slideNumber: number,
     update: SlideUpdate,
+    mode: TranscriptMode,
   ) => Promise<DesktopApiResult<DeckManifest>>;
   publishDeck: (deckId: string) => Promise<DesktopApiResult<DeckManifest>>;
   reformatDeckMath: (deckId: string) => Promise<DesktopApiResult<DeckManifest>>;
@@ -46,11 +56,16 @@ export type SlideTutorDesktopApi = {
   generateSlideAudio: (
     deckId: string,
     slideNumber: number,
+    mode: TranscriptMode,
   ) => Promise<DesktopApiResult<DeckManifest>>;
-  generateDeckAudio: (deckId: string) => Promise<DesktopApiResult<DeckManifest>>;
+  generateDeckAudio: (
+    deckId: string,
+    mode: TranscriptMode,
+  ) => Promise<DesktopApiResult<DeckManifest>>;
   getSlideAudioBytes: (
     deckId: string,
     slideNumber: number,
+    mode: TranscriptMode,
   ) => Promise<DesktopApiResult<Uint8Array | null>>;
   getSettings: () => Promise<DesktopApiResult<AppSettings>>;
   saveSettings: (settings: AppSettings) => Promise<DesktopApiResult<AppSettings>>;

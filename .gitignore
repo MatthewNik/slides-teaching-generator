@@ -21,6 +21,7 @@
 /build
 /dist-electron
 /release
+/release-fresh
 
 # misc
 .DS_Store

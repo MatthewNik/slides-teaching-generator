@@ -25,18 +25,13 @@ export function ExternalTranscriptImport({
   onMessage,
 }: ExternalTranscriptImportProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [pasteText, setPasteText] = useState("");
-
-  useEffect(() => {
+  const [pasteText, setPasteText] = useState(() => {
     try {
-      const saved = sessionStorage.getItem(pasteStorageKey(deck.id));
-      if (saved !== null) {
-        setPasteText(saved);
-      }
+      return sessionStorage.getItem(pasteStorageKey(deck.id)) ?? "";
     } catch {
-      // Ignore storage errors in restricted environments.
+      return "";
     }
-  }, [deck.id]);
+  });
 
   useEffect(() => {
     try {

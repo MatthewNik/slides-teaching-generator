@@ -36,7 +36,7 @@ async function loadPdfDocument(pdfUrl: string) {
       "pdfjs-dist/build/pdf.worker.min.mjs",
       import.meta.url,
     ).toString();
-    return pdfjs.getDocument({ url: pdfUrl }).promise as Promise<PdfDocumentHandle>;
+    return pdfjs.getDocument({ url: pdfUrl }).promise as unknown as Promise<PdfDocumentHandle>;
   })();
 
   pdfDocumentCache.set(pdfUrl, promise);
@@ -175,8 +175,8 @@ export function PdfSlide({
 
   const containerClassName =
     fitMode === "contain"
-      ? `relative flex h-full min-h-0 items-center justify-center overflow-hidden rounded-lg border border-line bg-white ${className}`.trim()
-      : `relative min-h-[320px] overflow-hidden rounded-lg border border-line bg-white ${className}`.trim();
+      ? `relative flex h-full min-h-0 items-center justify-center overflow-visible rounded-lg border border-line bg-white ${className}`.trim()
+      : `relative flex min-h-[320px] items-center justify-center overflow-hidden rounded-lg border border-line bg-white ${className}`.trim();
 
   return (
     <div ref={containerRef} className={containerClassName} onClick={onClick}>
@@ -190,7 +190,7 @@ export function PdfSlide({
       ) : (
         <canvas
           ref={canvasRef}
-          className="block max-h-full max-w-full transition-opacity duration-150"
+          className="block shrink-0 transition-opacity duration-150"
           style={{ opacity: showInitialSpinner ? 0.72 : 1 }}
         />
       )}
