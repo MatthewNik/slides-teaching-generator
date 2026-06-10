@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
 import { spawn } from "child_process";
 import { promises as fs, existsSync } from "fs";
 import path from "path";
@@ -31,6 +31,20 @@ import {
 import type { DesktopApiResult, ImportedSlideInput, SlideUpdate } from "../src/types/electron";
 
 const MODEL = "gemini-2.5-flash";
+const STATIC_RENDERER_PROTOCOL = "slide-tutor";
+const STATIC_RENDERER_HOST = "app";
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: STATIC_RENDERER_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
+]);
 
 function dataRoot() {
   return (
@@ -1076,6 +1090,33 @@ function resolveAppIcon() {
   return undefined;
 }
 
+function rendererOutDir() {
+  return path.join(app.getAppPath(), "out");
+}
+
+function resolveRendererFile(requestUrl: string) {
+  const url = new URL(requestUrl);
+  const root = path.resolve(rendererOutDir());
+  const requestedPath =
+    decodeURIComponent(url.pathname) === "/"
+      ? "index.html"
+      : decodeURIComponent(url.pathname).replace(/^\/+/, "");
+  const resolvedPath = path.resolve(root, requestedPath);
+
+  if (resolvedPath !== root && !resolvedPath.startsWith(`${root}${path.sep}`)) {
+    throw new Error("Blocked renderer path traversal.");
+  }
+
+  return resolvedPath;
+}
+
+function registerStaticRendererProtocol() {
+  protocol.handle(STATIC_RENDERER_PROTOCOL, (request) => {
+    const filePath = resolveRendererFile(request.url);
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+}
+
 async function createWindow() {
   const appIcon = resolveAppIcon();
 
@@ -1100,7 +1141,7 @@ async function createWindow() {
     await mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
     await mainWindow.loadURL(
-      pathToFileURL(path.join(app.getAppPath(), "out", "index.html")).toString(),
+      `${STATIC_RENDERER_PROTOCOL}://${STATIC_RENDERER_HOST}/index.html`,
     );
   }
 }
@@ -1111,6 +1152,11 @@ app.whenReady().then(async () => {
   }
 
   await ensureDir(dataRoot());
+
+  if (!process.env.ELECTRON_RENDERER_URL) {
+    registerStaticRendererProtocol();
+  }
+
   await createWindow();
 
   app.on("activate", () => {
