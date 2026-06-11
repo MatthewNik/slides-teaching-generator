@@ -134,6 +134,67 @@ function normalizeParenWrappedMath(text: string) {
     );
 }
 
+function isMarkdownArtifactLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (/^[=#\-]{3,}$/.test(trimmed)) return true;
+  if (/^[=#\-]{10,}/.test(trimmed)) return true;
+  return false;
+}
+
+function stripMarkdownArtifacts(markdown: string) {
+  return markdown
+    .split("\n")
+    .filter((line) => !isMarkdownArtifactLine(line))
+    .join("\n");
+}
+
+function stripHeadingFromMathLine(line: string) {
+  const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+  if (!headingMatch) return line;
+
+  const content = headingMatch[2]?.trim() ?? "";
+  if (
+    looksLikeLatexMath(content) ||
+    /\\[a-zA-Z]+|_\{|_\w|\^\{|\^\w|\\frac|\\left|\\right|=/.test(content)
+  ) {
+    return content;
+  }
+
+  return line;
+}
+
+function sanitizeImportMarkdown(markdown: string) {
+  return stripMarkdownArtifacts(markdown)
+    .split("\n")
+    .map((line) => stripHeadingFromMathLine(line))
+    .join("\n");
+}
+
+function wrapUndelimitedDisplayEquations(markdown: string) {
+  return markdown
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || hasMathDelimiters(trimmed)) return line;
+
+      const hasEquals = trimmed.includes("=");
+      const hasLatexCommand = /\\[a-zA-Z]+|\\frac|\\left|\\right/.test(trimmed);
+      const hasSubSuper = /_[A-Za-z0-9{]|\^[A-Za-z0-9{]/.test(trimmed);
+
+      if (hasEquals && (hasLatexCommand || hasSubSuper)) {
+        return `$$${trimmed}$$`;
+      }
+
+      if (hasLatexCommand && trimmed.length >= 12 && (hasSubSuper || hasEquals)) {
+        return `$$${trimmed}$$`;
+      }
+
+      return line;
+    })
+    .join("\n");
+}
+
 function normalizeProseDisplayMath(markdown: string) {
   return markdown.replace(/\$\$([\s\S]+?)\$\$/g, (match, inner: string) => {
     const trimmed = inner.trim();
@@ -168,7 +229,9 @@ export function normalizeMathFragments(
   markdown: string,
   mode: "conservative" | "aggressive" = "conservative",
 ) {
-  const withSymbols = replaceUnicodeSymbols(normalizeProseDisplayMath(markdown));
+  const sanitized = sanitizeImportMarkdown(markdown);
+  const withDisplayEquations = wrapUndelimitedDisplayEquations(sanitized);
+  const withSymbols = replaceUnicodeSymbols(normalizeProseDisplayMath(withDisplayEquations));
   const { protectedMarkdown, protectedSegments } = protectExistingMath(withSymbols);
 
   const normalized = normalizeParenWrappedMath(protectedMarkdown)

@@ -454,7 +454,7 @@ Requirements:
 - Example transcriptMarkdown sentence: "The gain is \\(K_p\\) and the phase depends on \\(\\omega t\\)."
 - transcriptLatex should preserve the mathematical notation clearly.
 - speechText must be plain narration for text-to-speech. Do not include raw LaTeX commands. Read equations naturally, e.g. "K sub p equals the limit as s approaches zero of G of s."
-- Keep each slide transcript focused enough to be spoken in roughly 45 to 120 seconds.
+- ${preset.lengthGuidance}
 - Include key terms, variables, and formulas in keyTerms.
 - Set generationStatus to "generated".
 `;
@@ -684,7 +684,12 @@ async function reformatDeckMath(deckId: string) {
   });
 }
 
-async function importExternalTranscripts(deckId: string, slides: ImportedSlideInput[]) {
+async function importExternalTranscripts(
+  deckId: string,
+  slides: ImportedSlideInput[],
+  modeInput: TranscriptMode,
+) {
+  const mode = coerceTranscriptMode(modeInput);
   const deck = await requireDeck(deckId);
   const parsed = importExternalTranscriptsSchema.parse({ slides });
 
@@ -706,58 +711,80 @@ async function importExternalTranscripts(deckId: string, slides: ImportedSlideIn
       }
 
       const normalizedMarkdown = normalizeMathFragments(imported.transcriptMarkdown);
-      const speechChanged = imported.speechText.trim() !== existing.speechText.trim();
+      const prevVariant =
+        existing.transcriptsByMode?.[mode] ??
+        (mode === DEFAULT_TRANSCRIPT_MODE ? variantFromSlide(existing) : undefined);
+      const speechChanged = imported.speechText.trim() !== (prevVariant?.speechText.trim() ?? "");
 
-      return {
-        ...existing,
-        title: imported.title,
+      const variant: SlideTranscriptVariant = {
         transcriptMarkdown: normalizedMarkdown,
         transcriptLatex: imported.transcriptLatex || normalizedMarkdown,
         speechText: imported.speechText,
         keyTerms: imported.keyTerms ?? existing.keyTerms,
-        generationStatus: "reviewed" as const,
-        audioPath: speechChanged ? undefined : existing.audioPath,
+        generationStatus: "reviewed",
+        audioPath: speechChanged ? undefined : prevVariant?.audioPath,
         ttsStatus: speechChanged
           ? ("none" as const)
-          : existing.audioPath
+          : prevVariant?.audioPath
             ? ("ready" as const)
             : ("none" as const),
-        ttsError: speechChanged ? undefined : existing.ttsError,
+        ttsError: speechChanged ? undefined : prevVariant?.ttsError,
       };
+
+      const byMode = { ...(existing.transcriptsByMode ?? {}), [mode]: variant };
+      let next: SlideTranscript = {
+        ...existing,
+        title: imported.title,
+        transcriptsByMode: byMode,
+      };
+
+      if (mode === DEFAULT_TRANSCRIPT_MODE || !existing.transcriptMarkdown.trim()) {
+        next = mirrorTopLevel(next, variant);
+        next.title = imported.title;
+      }
+
+      return next;
     });
   } else {
     updatedSlides = parsed.slides
-      .map(
-        (slide): SlideTranscript => ({
-          slideNumber: slide.slideNumber,
-          title: slide.title,
-          transcriptMarkdown: normalizeMathFragments(slide.transcriptMarkdown),
-          transcriptLatex: slide.transcriptLatex || slide.transcriptMarkdown,
+      .map((slide): SlideTranscript => {
+        const normalizedMarkdown = normalizeMathFragments(slide.transcriptMarkdown);
+        const variant: SlideTranscriptVariant = {
+          transcriptMarkdown: normalizedMarkdown,
+          transcriptLatex: slide.transcriptLatex || normalizedMarkdown,
           speechText: slide.speechText,
           keyTerms: slide.keyTerms ?? [],
           generationStatus: "reviewed",
           ttsStatus: "none",
           audioPath: undefined,
           ttsError: undefined,
-        }),
-      )
+        };
+
+        const base: SlideTranscript = {
+          slideNumber: slide.slideNumber,
+          title: slide.title,
+          transcriptMarkdown: "",
+          transcriptLatex: "",
+          speechText: "",
+          keyTerms: [],
+          generationStatus: "draft",
+          transcriptsByMode: { [mode]: variant },
+        };
+
+        if (mode === DEFAULT_TRANSCRIPT_MODE) {
+          return mirrorTopLevel(base, variant);
+        }
+
+        return { ...base, title: slide.title };
+      })
       .sort((a, b) => a.slideNumber - b.slideNumber);
   }
-
-  // Imported content is treated as the canonical "summary" mode transcript.
-  const slidesWithModes = updatedSlides.map((slide) => ({
-    ...slide,
-    transcriptsByMode: {
-      ...(slide.transcriptsByMode ?? {}),
-      [DEFAULT_TRANSCRIPT_MODE]: variantFromSlide(slide),
-    },
-  }));
 
   return saveDeck({
     ...deck,
     status: "ready",
-    pageCount: deck.pageCount ?? slidesWithModes.length,
-    slides: slidesWithModes,
+    pageCount: deck.pageCount ?? updatedSlides.length,
+    slides: updatedSlides,
     error: undefined,
   });
 }
@@ -1015,8 +1042,12 @@ function registerIpc(mainWindow: BrowserWindow) {
   );
   ipcMain.handle(
     "decks:import-external-transcripts",
-    (_event, deckId: string, slides: ImportedSlideInput[]) =>
-      api(() => importExternalTranscripts(deckId, slides)),
+    (
+      _event,
+      deckId: string,
+      slides: ImportedSlideInput[],
+      mode: TranscriptMode,
+    ) => api(() => importExternalTranscripts(deckId, slides, mode)),
   );
   ipcMain.handle("decks:rename", (_event, deckId: string, title: string) =>
     api(() => renameDeck(deckId, title)),

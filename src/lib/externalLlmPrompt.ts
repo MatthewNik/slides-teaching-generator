@@ -1,4 +1,8 @@
 import { SLIDE_DELIMITER } from "./importTranscripts";
+import {
+  TRANSCRIPT_MODE_PRESETS,
+  type TranscriptMode,
+} from "./transcriptModes";
 import type { DeckManifest } from "./types";
 
 function expectedSlideCountLabel(deck: DeckManifest) {
@@ -6,8 +10,9 @@ function expectedSlideCountLabel(deck: DeckManifest) {
   return count && count > 0 ? String(count) : "the same number of pages as the attached PDF";
 }
 
-export function buildExternalLlmPrompt(deck: DeckManifest) {
+export function buildExternalLlmPrompt(deck: DeckManifest, mode: TranscriptMode) {
   const slideCount = expectedSlideCountLabel(deck);
+  const preset = TRANSCRIPT_MODE_PRESETS[mode];
 
   return `You are creating teaching notes for a PDF slide deck named "${deck.title}".
 
@@ -17,14 +22,19 @@ Create exactly ${slideCount} slide blocks, one per PDF page, in page order.
 
 For each slide, explain what is visible on that page for a student learning without a live instructor.
 
+Transcript style: ${preset.label}.
+${preset.externalPromptInstructions}
+
 Output rules:
 - Use the exact format below for every slide.
 - Put Markdown with LaTeX in the ---MARKDOWN--- section. Use \\( ... \\) for inline math and $$ ... $$ on their own lines for display equations.
 - Every equation, variable, subscript, superscript, fraction, and symbol must be written as proper LaTeX inside those delimiters. Do not write plain-text or Unicode math such as Ploss=IRMS2R, P_loss=I_RMS^2 R, or pasted subscript characters.
+- Every standalone equation must appear on its own line wrapped in $$ ... $$ with valid LaTeX inside.
 - Parenthetical notation such as (D_1), (i_s), (R), and (V_C) is accepted for inline references, but full equations should still use $$ ... $$ blocks with valid LaTeX such as $$P_\\text{loss} = I_\\text{RMS}^2 R$$.
 - Use LaTeX commands for notation, for example \\(P_\\text{loss} = I_\\text{RMS}^2 R\\), \\(V_o\\), \\(\\Delta V_o\\), \\(\\cos\\phi\\), and \\(\\frac{L}{R}\\).
 - Put plain spoken narration in the ---SPEECH--- section. Do not use raw LaTeX in speech text. Verbalize equations naturally.
-- Keep each slide focused enough to speak in roughly 45 to 120 seconds.
+- ${preset.lengthGuidance}
+- Do not use markdown headings (#, ##, etc.), horizontal rules, or decorative lines of repeated = or - characters inside ---MARKDOWN---.
 - After every slide block except the last, put exactly 10 commas on their own line as the slide separator.
 
 Exact format to follow:
@@ -55,8 +65,8 @@ Important:
 - Do not add extra commentary before or after the slide blocks.
 - Do not skip the ---MARKDOWN--- or ---SPEECH--- markers.
 - In ---MARKDOWN---, never leave equations as plain text or Unicode subscripts/superscripts. Always convert them to renderable LaTeX inside \\( ... \\) or $$ ... $$.
-- Bad: Ploss=IRMS2R, I_RMS, v_o(t), ΔV_o without delimiters.
-- Good: \\(P_\\text{loss} = I_\\text{RMS}^2 R\\), \\(I_\\text{RMS}\\), \\(v_o(t)\\), \\(\\Delta V_o\\).
+- Bad: Ploss=IRMS2R, I_RMS, v_o(t), ΔV_o without delimiters, or lines like ========== or ## inside markdown.
+- Good: \\(P_\\text{loss} = I_\\text{RMS}^2 R\\), \\(I_\\text{RMS}\\), \\(v_o(t)\\), \\(\\Delta V_o\\), and display equations on their own line inside $$ ... $$.
 - Use exactly this separator between slides, on its own line: ${SLIDE_DELIMITER}
 - Match the number of slides to the PDF page count.`;
 }

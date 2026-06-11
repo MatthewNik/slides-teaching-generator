@@ -25,8 +25,8 @@ const api: SlideTutorDesktopApi = {
   ) => ipcRenderer.invoke("decks:save-slide", deckId, slideNumber, update, mode),
   publishDeck: (deckId: string) => ipcRenderer.invoke("decks:publish", deckId),
   reformatDeckMath: (deckId: string) => ipcRenderer.invoke("decks:reformat-math", deckId),
-  importExternalTranscripts: (deckId: string, slides: ImportedSlideInput[]) =>
-    ipcRenderer.invoke("decks:import-external-transcripts", deckId, slides),
+  importExternalTranscripts: (deckId: string, slides: ImportedSlideInput[], mode: TranscriptMode) =>
+    ipcRenderer.invoke("decks:import-external-transcripts", deckId, slides, mode),
   renameDeck: (deckId: string, title: string) =>
     ipcRenderer.invoke("decks:rename", deckId, title),
   deleteDeck: (deckId: string) => ipcRenderer.invoke("decks:delete", deckId),

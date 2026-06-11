@@ -43,6 +43,7 @@ export type SlideTutorDesktopApi = {
   importExternalTranscripts: (
     deckId: string,
     slides: ImportedSlideInput[],
+    mode: TranscriptMode,
   ) => Promise<DesktopApiResult<DeckManifest>>;
   renameDeck: (deckId: string, title: string) => Promise<DesktopApiResult<DeckManifest>>;
   deleteDeck: (deckId: string) => Promise<DesktopApiResult<void>>;

@@ -168,7 +168,7 @@ export function parseExternalTranscriptImport(
   const errors: string[] = [];
 
   if (!trimmed) {
-    return { slides: [], warnings, errors: ["Paste the full ChatGPT response first."] };
+    return { slides: [], warnings, errors: ["Paste the full LLM response first."] };
   }
 
   if (!hasCommaDelimiter(trimmed) && !hasSlideHeaders(trimmed)) {

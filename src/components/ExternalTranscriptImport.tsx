@@ -2,10 +2,16 @@
 
 import { buildExternalLlmPrompt } from "@/lib/externalLlmPrompt";
 import { parseExternalTranscriptImport } from "@/lib/importTranscripts";
+import {
+  DEFAULT_TRANSCRIPT_MODE,
+  TRANSCRIPT_MODE_PRESETS,
+  type TranscriptMode,
+} from "@/lib/transcriptModes";
 import type { DeckManifest } from "@/lib/types";
 import type { ImportedSlideInput } from "@/lib/schemas";
 import { ClipboardCopy, FileUp } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { TranscriptModeMenu } from "./TranscriptModeMenu";
 
 function pasteStorageKey(deckId: string) {
   return `slide-tutor:external-import:${deckId}`;
@@ -14,7 +20,7 @@ function pasteStorageKey(deckId: string) {
 type ExternalTranscriptImportProps = {
   deck: DeckManifest;
   isBusy: boolean;
-  onImport: (slides: ImportedSlideInput[]) => Promise<void>;
+  onImport: (slides: ImportedSlideInput[], mode: TranscriptMode) => Promise<void>;
   onMessage: (message: string) => void;
 };
 
@@ -25,6 +31,7 @@ export function ExternalTranscriptImport({
   onMessage,
 }: ExternalTranscriptImportProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [importMode, setImportMode] = useState<TranscriptMode>(DEFAULT_TRANSCRIPT_MODE);
   const [pasteText, setPasteText] = useState(() => {
     try {
       return sessionStorage.getItem(pasteStorageKey(deck.id)) ?? "";
@@ -42,6 +49,7 @@ export function ExternalTranscriptImport({
   }, [deck.id, pasteText]);
 
   const expectedSlideCount = deck.slides.length || deck.pageCount || 0;
+  const importModePreset = TRANSCRIPT_MODE_PRESETS[importMode];
 
   const parseResult = useMemo(
     () => parseExternalTranscriptImport(pasteText, expectedSlideCount || undefined),
@@ -51,11 +59,13 @@ export function ExternalTranscriptImport({
   const canImport = parseResult.errors.length === 0 && parseResult.slides.length > 0;
 
   async function copyPrompt() {
-    const prompt = buildExternalLlmPrompt(deck);
+    const prompt = buildExternalLlmPrompt(deck, importMode);
 
     try {
       await navigator.clipboard.writeText(prompt);
-      onMessage("External LLM prompt copied. Attach the PDF in ChatGPT, then paste the response here.");
+      onMessage(
+        `${importModePreset.label} prompt copied. Attach the PDF to your LLM, then paste the response here.`,
+      );
     } catch {
       onMessage("Could not copy the prompt to the clipboard.");
     }
@@ -68,8 +78,8 @@ export function ExternalTranscriptImport({
     const importedCount = parseResult.slides.length;
     const replaceMessage =
       existingCount > 0
-        ? `This will update markdown and speech for ${importedCount} slides. Existing slides and PDF are kept. Continue?`
-        : `Import ${importedCount} slides into this deck?`;
+        ? `This will update the ${importModePreset.label} transcript for ${importedCount} slides. Other modes are kept separately. Continue?`
+        : `Import ${importedCount} slides as ${importModePreset.label} transcripts?`;
 
     if (!window.confirm(replaceMessage)) {
       return;
@@ -84,6 +94,7 @@ export function ExternalTranscriptImport({
         speechText: slide.speechText,
         keyTerms: slide.keyTerms,
       })),
+      importMode,
     );
   }
 
@@ -104,11 +115,27 @@ export function ExternalTranscriptImport({
       {isOpen ? (
         <div className="grid gap-3 border-t border-line p-4">
           <p className="text-sm text-zinc-600">
-            Copy the prompt into ChatGPT with your PDF attached, then paste the full response below.
-            Each slide must include <code className="font-mono">---MARKDOWN---</code> and{" "}
+            Choose an explanation type, copy the tailored prompt into your external LLM with your PDF
+            attached, then paste the full response below. Each slide must include{" "}
+            <code className="font-mono">---MARKDOWN---</code> and{" "}
             <code className="font-mono">---SPEECH---</code>, separated by commas or slide headers
             between slides.
           </p>
+
+          <div className="grid gap-2 text-sm font-medium">
+            <span>Explanation type for this import</span>
+            <div className="max-w-sm">
+              <TranscriptModeMenu
+                compact
+                value={importMode}
+                onChange={setImportMode}
+              />
+            </div>
+            <p className="text-sm font-normal text-zinc-600">
+              {importModePreset.description} Imported content is saved to the{" "}
+              <span className="font-semibold">{importModePreset.label}</span> slot only.
+            </p>
+          </div>
 
           <div className="flex flex-wrap gap-2">
             <button
@@ -117,17 +144,17 @@ export function ExternalTranscriptImport({
               className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
             >
               <ClipboardCopy size={17} />
-              Copy prompt
+              Copy {importModePreset.label} prompt
             </button>
           </div>
 
           <label className="grid gap-2 text-sm font-medium">
-            Paste ChatGPT response
+            Paste the LLM response
             <textarea
               value={pasteText}
               onChange={(event) => setPasteText(event.target.value)}
               rows={12}
-              placeholder="Paste the full response from ChatGPT here..."
+              placeholder="Paste the full LLM response here..."
               className="min-h-[12rem] resize-y rounded-md border border-line bg-white px-3 py-2 font-mono text-sm cursor-text caret-accent outline-none focus:border-accent"
             />
           </label>
@@ -136,7 +163,7 @@ export function ExternalTranscriptImport({
             <div className="rounded-md border border-line bg-panel-muted p-3 text-sm">
               <p className="font-semibold">
                 Ready to import {parseResult.slides.length} slide
-                {parseResult.slides.length === 1 ? "" : "s"}
+                {parseResult.slides.length === 1 ? "" : "s"} as {importModePreset.label}
               </p>
               <ul className="mt-2 grid gap-1 text-zinc-700">
                 {parseResult.slides.slice(0, 6).map((slide) => (
@@ -170,7 +197,7 @@ export function ExternalTranscriptImport({
             className="inline-flex h-10 w-fit items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-white hover:bg-accent-strong"
           >
             <FileUp size={17} />
-            Import slides
+            Import as {importModePreset.label}
           </button>
         </div>
       ) : null}

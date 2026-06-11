@@ -48,6 +48,7 @@ import {
 import type { ImportedSlideInput } from "@/lib/schemas";
 import type { SlideUpdate } from "@/types/electron";
 import { ExternalTranscriptImport } from "./ExternalTranscriptImport";
+import { FolderSelectMenu } from "./FolderSelectMenu";
 import { LocalLibraryDropZone } from "./LocalLibraryDropZone";
 import { useAutoDismissMessage } from "@/hooks/useAutoDismissMessage";
 import { MarkdownTranscript } from "./MarkdownTranscript";
@@ -137,9 +138,15 @@ function folderName(folders: DeckFolder[], folderId?: string | null) {
   return folders.find((folder) => folder.id === folderId)?.name ?? "Unfiled";
 }
 
+function effectiveSlideCount(deck: DeckManifest | null, pdfPageCount: number) {
+  if (!deck) return 0;
+  return Math.max(deck.slides.length, pdfPageCount, deck.pageCount ?? 0);
+}
+
 function PdfFromDeck({
   deckId,
   pageNumber,
+  onPageCount,
   scaleMultiplier = 1,
   fitMode = "width",
   className = "",
@@ -147,6 +154,7 @@ function PdfFromDeck({
 }: {
   deckId: string;
   pageNumber: number;
+  onPageCount?: (pageCount: number) => void;
   scaleMultiplier?: number;
   fitMode?: "width" | "contain";
   className?: string;
@@ -203,6 +211,7 @@ function PdfFromDeck({
     <PdfSlide
       pdfUrl={pdfUrl}
       pageNumber={pageNumber}
+      onPageCount={onPageCount}
       scaleMultiplier={scaleMultiplier}
       fitMode={fitMode}
       className={className}
@@ -250,7 +259,7 @@ function DesktopAudioControls({
   onMessage,
 }: {
   deck: DeckManifest;
-  slide: SlideTranscript;
+  slide?: SlideTranscript;
   variant: SlideTranscriptVariant | null;
   mode: TranscriptMode;
   voiceRate: number;
@@ -303,7 +312,7 @@ function DesktopAudioControls({
     }, 0);
 
     async function loadAudio() {
-      if (!variantAudioPath) {
+      if (!variantAudioPath || !slide) {
         setAudioLoadFailed(false);
         setIsLoadingAudio(false);
         return;
@@ -341,7 +350,7 @@ function DesktopAudioControls({
       window.clearTimeout(resetTimer);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [deck.id, mode, onMessage, slide.slideNumber, variantAudioPath]);
+  }, [deck.id, mode, onMessage, slide, variantAudioPath]);
 
   useEffect(() => {
     if (!autoplay || userStoppedRef.current) return;
@@ -372,7 +381,7 @@ function DesktopAudioControls({
     }
 
     return undefined;
-  }, [audioUrl, autoplay, deck.id, isLoadingAudio, onMessage, slide.slideNumber, speechText, variantAudioPath]);
+  }, [audioUrl, autoplay, deck.id, isLoadingAudio, onMessage, slide?.slideNumber, speechText, variantAudioPath]);
 
   async function generateDeckAudio() {
     setIsGeneratingDeck(true);
@@ -456,7 +465,7 @@ function DesktopAudioControls({
       <SpeechControls
         ref={speechRef}
         text={speechText}
-        slideKey={`${deck.id}-${slide.slideNumber}-${mode}`}
+        slideKey={`${deck.id}-${slide?.slideNumber ?? 0}-${mode}`}
         rate={voiceRate}
         onError={(error) => onMessage(error, { isError: true })}
         onPlaybackChange={handleSpeechPlaybackChange}
@@ -492,7 +501,7 @@ function DesktopAudioControls({
       <button
         type="button"
         onClick={handlePlay}
-        disabled={!speechText.trim() || isLoadingAudio}
+        disabled={!slide || !speechText.trim() || isLoadingAudio}
         aria-label={playLabel}
         title={playLabel}
         className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent text-white hover:bg-accent-strong"
@@ -557,6 +566,7 @@ function DesktopAudioControls({
 
 export function DesktopApp() {
   const resizeRef = useRef<HTMLDivElement | null>(null);
+  const viewerSlideButtonRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const { message, isVisible, showMessage } = useAutoDismissMessage();
   const [isMounted, setIsMounted] = useState(false);
   const [view, setView] = useState<ViewMode>("library");
@@ -564,6 +574,7 @@ export function DesktopApp() {
   const [folders, setFolders] = useState<DeckFolder[]>([]);
   const [activeDeck, setActiveDeck] = useState<DeckManifest | null>(null);
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
+  const [pdfPageCount, setPdfPageCount] = useState(0);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [newDeckTitle, setNewDeckTitle] = useState("");
   const [newFolderName, setNewFolderName] = useState("");
@@ -576,6 +587,26 @@ export function DesktopApp() {
   const transcriptMode = settings.transcriptMode;
   const activeVariant = activeSlide ? resolveVariant(activeSlide, transcriptMode) : null;
   const activeModePreset = TRANSCRIPT_MODE_PRESETS[transcriptMode];
+  const deckSlideCount = effectiveSlideCount(activeDeck, pdfPageCount);
+  const currentPageNumber = activeSlide?.slideNumber ?? activeSlideIndex + 1;
+  const currentSlideTitle = activeSlide?.title ?? `Slide ${currentPageNumber}`;
+
+  const handlePdfPageCount = useCallback((count: number) => {
+    setPdfPageCount((current) => Math.max(current, count));
+  }, []);
+
+  const slideListItems = useMemo(() => {
+    if (!activeDeck || deckSlideCount === 0) return [];
+
+    return Array.from({ length: deckSlideCount }, (_, index) => {
+      const slide = activeDeck.slides[index];
+      return {
+        index,
+        slideNumber: slide?.slideNumber ?? index + 1,
+        title: slide?.title ?? `Slide ${index + 1}`,
+      };
+    });
+  }, [activeDeck, deckSlideCount]);
 
   const isElectron = isMounted && Boolean(window.slideTutor);
 
@@ -634,6 +665,32 @@ export function DesktopApp() {
   function updateAutoSetting(patch: Partial<AppSettings>) {
     const nextSettings = { ...settings, ...patch };
     persistSettings(nextSettings);
+  }
+
+  useEffect(() => {
+    const nextPageCount = activeDeck?.pageCount ?? activeDeck?.slides.length ?? 0;
+    const timer = window.setTimeout(() => setPdfPageCount(nextPageCount), 0);
+    return () => window.clearTimeout(timer);
+  }, [activeDeck]);
+
+  useEffect(() => {
+    if (!activeDeck || deckSlideCount === 0) return;
+    if (activeSlideIndex > deckSlideCount - 1) {
+      const timer = window.setTimeout(() => setActiveSlideIndex(deckSlideCount - 1), 0);
+      return () => window.clearTimeout(timer);
+    }
+
+    return undefined;
+  }, [activeDeck, activeSlideIndex, deckSlideCount]);
+
+  function openZoomOverlay(page: number) {
+    setZoomScale(1);
+    setZoomPage(page);
+  }
+
+  function closeZoomOverlay() {
+    setZoomPage(null);
+    setZoomScale(1);
   }
 
   async function openDeck(deckId: string, mode: ViewMode) {
@@ -821,42 +878,27 @@ export function DesktopApp() {
     }
   }
 
-  async function reformatDeckMath() {
+  async function importExternalTranscripts(
+    slides: ImportedSlideInput[],
+    mode: TranscriptMode,
+  ) {
     if (!activeDeck) return;
 
     setIsBusy(true);
-    showMessage("Reformatting math in all slides...");
+    const presetLabel = TRANSCRIPT_MODE_PRESETS[mode].label;
+    showMessage(`Importing ${presetLabel} transcripts...`);
 
     try {
-      const result = await desktopApi().reformatDeckMath(activeDeck.id);
-
-      if (!result.ok) throw new Error(result.error);
-
-      setActiveDeck(result.data);
-      showMessage("Math formatting updated for all slides.");
-      await loadDecks();
-    } catch (error) {
-      showMessage(error instanceof Error ? error.message : "Could not reformat math.", { isError: true });
-    } finally {
-      setIsBusy(false);
-    }
-  }
-
-  async function importExternalTranscripts(slides: ImportedSlideInput[]) {
-    if (!activeDeck) return;
-
-    setIsBusy(true);
-    showMessage("Importing external transcripts...");
-
-    try {
-      const result = await desktopApi().importExternalTranscripts(activeDeck.id, slides);
+      const result = await desktopApi().importExternalTranscripts(activeDeck.id, slides, mode);
 
       if (!result.ok) throw new Error(result.error);
 
       setActiveDeck(result.data);
       setEditingDeckTitle(result.data.title);
       setActiveSlideIndex(0);
-      showMessage(`Updated markdown and speech for ${slides.length} slides. Review and publish when ready.`);
+      showMessage(
+        `Updated ${presetLabel} transcripts for ${slides.length} slides. Review and publish when ready.`,
+      );
       await loadDecks();
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "Could not import transcripts.", { isError: true });
@@ -1045,9 +1087,10 @@ export function DesktopApp() {
 
   const slideCountLabel = useMemo(() => {
     if (!activeDeck) return "";
-    const total = activeDeck.slides.length || activeDeck.pageCount || 0;
-    return total > 0 ? `Slide ${activeSlideIndex + 1} of ${total}` : "No scripts yet";
-  }, [activeDeck, activeSlideIndex]);
+    return deckSlideCount > 0
+      ? `Slide ${activeSlideIndex + 1} of ${deckSlideCount}`
+      : "No slides yet";
+  }, [activeDeck, activeSlideIndex, deckSlideCount]);
 
   const viewerImmersive = useMemo(
     () => !settings.viewerShowTranscript && !settings.viewerShowSlideList,
@@ -1057,7 +1100,7 @@ export function DesktopApp() {
   useEffect(() => {
     if (view !== "viewer" || !activeDeck) return;
 
-    const slideCount = activeDeck.slides.length;
+    const slideCount = deckSlideCount;
     if (slideCount === 0) return;
 
     function onKeyDown(event: KeyboardEvent) {
@@ -1090,7 +1133,14 @@ export function DesktopApp() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [view, activeDeck]);
+  }, [view, activeDeck, deckSlideCount]);
+
+  useEffect(() => {
+    if (view !== "viewer" || !settings.viewerShowSlideList) return;
+
+    const button = viewerSlideButtonRefs.current.get(activeSlideIndex);
+    button?.scrollIntoView({ block: "nearest" });
+  }, [view, activeSlideIndex, settings.viewerShowSlideList, deckSlideCount]);
 
   useEffect(() => {
     if (!zoomPage) return;
@@ -1098,7 +1148,7 @@ export function DesktopApp() {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      setZoomPage(null);
+      closeZoomOverlay();
     }
 
     window.addEventListener("keydown", onKeyDown);
@@ -1308,20 +1358,11 @@ export function DesktopApp() {
                                 </div>
                               </div>
                               <div className="flex flex-wrap gap-2">
-                                <select
-                                  value={deck.folderId ?? ""}
-                                  onChange={(event) =>
-                                    assignFolder(deck.id, event.target.value || null)
-                                  }
-                                  className="h-10 rounded-md border border-line bg-white px-2 text-sm"
-                                >
-                                  <option value="">Unfiled</option>
-                                  {folders.map((item) => (
-                                    <option key={item.id} value={item.id}>
-                                      {item.name}
-                                    </option>
-                                  ))}
-                                </select>
+                                <FolderSelectMenu
+                                  value={deck.folderId ?? null}
+                                  folders={folders}
+                                  onChange={(folderId) => assignFolder(deck.id, folderId)}
+                                />
                                 <button
                                   type="button"
                                   onClick={() => openDeck(deck.id, "editor")}
@@ -1469,30 +1510,28 @@ export function DesktopApp() {
         ) : null}
 
         {view === "editor" && activeDeck ? (
-          <section className="grid gap-4 lg:grid-cols-[250px_minmax(0,1fr)]">
-            <aside className="rounded-lg border border-line bg-panel">
-              <div className="border-b border-line p-3 text-sm font-semibold">
+          <section className="grid h-[calc(100vh-110px)] min-h-0 gap-4 lg:grid-cols-[250px_minmax(0,1fr)]">
+            <aside className="flex min-h-0 flex-col rounded-lg border border-line bg-panel">
+              <div className="shrink-0 border-b border-line p-3 text-sm font-semibold">
                 {statusText(activeDeck)}
               </div>
-              <div className="scroll-area max-h-[min(720px,calc(100vh-220px))] overflow-auto">
-                {activeDeck.slides.length === 0 ? (
-                  <p className="p-4 text-sm text-zinc-600">
-                    No transcripts yet. Generate with Gemini or import from an external LLM.
-                  </p>
+              <div className="scroll-area min-h-0 flex-1 overflow-auto">
+                {slideListItems.length === 0 ? (
+                  <p className="p-4 text-sm text-zinc-600">Loading PDF pages...</p>
                 ) : (
-                  activeDeck.slides.map((item, index) => (
+                  slideListItems.map((item) => (
                     <button
                       key={item.slideNumber}
                       type="button"
-                      onClick={() => setActiveSlideIndex(index)}
-                      aria-current={index === activeSlideIndex}
+                      onClick={() => setActiveSlideIndex(item.index)}
+                      aria-current={item.index === activeSlideIndex}
                       className={`block w-full border-b border-line px-3 py-2.5 text-left text-sm transition-colors hover:bg-panel-muted ${
-                        index === activeSlideIndex
+                        item.index === activeSlideIndex
                           ? "border-l-2 border-l-accent bg-panel-muted font-semibold"
                           : "border-l-2 border-l-transparent"
                       }`}
                     >
-                      <span className={index === activeSlideIndex ? "text-accent" : "text-zinc-500"}>
+                      <span className={item.index === activeSlideIndex ? "text-accent" : "text-zinc-500"}>
                         Slide {item.slideNumber}
                       </span>
                       <span className="mt-0.5 block truncate text-zinc-600">
@@ -1536,15 +1575,6 @@ export function DesktopApp() {
                     </button>
                     <button
                       type="button"
-                      onClick={reformatDeckMath}
-                      disabled={!activeDeck.slides.length || isBusy}
-                      className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
-                    >
-                      <RefreshCw size={17} />
-                      Reformat math
-                    </button>
-                    <button
-                      type="button"
                       onClick={publishActiveDeck}
                       disabled={!activeDeck.slides.length || isBusy}
                       className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-white hover:bg-accent-strong"
@@ -1558,20 +1588,13 @@ export function DesktopApp() {
                   <span>{slideCountLabel}</span>
                   <label className="flex items-center gap-2">
                     Folder
-                    <select
-                      value={activeDeck.folderId ?? ""}
-                      onChange={(event) =>
-                        assignFolder(activeDeck.id, event.target.value || null)
-                      }
-                      className="h-9 rounded-md border border-line bg-white px-2 text-sm text-foreground"
-                    >
-                      <option value="">Unfiled</option>
-                      {folders.map((folder) => (
-                        <option key={folder.id} value={folder.id}>
-                          {folder.name}
-                        </option>
-                      ))}
-                    </select>
+                    <FolderSelectMenu
+                      compact
+                      className="w-44"
+                      value={activeDeck.folderId ?? null}
+                      folders={folders}
+                      onChange={(folderId) => assignFolder(activeDeck.id, folderId)}
+                    />
                   </label>
                   <div className="flex items-center gap-2">
                     <span>Transcript mode</span>
@@ -1603,113 +1626,138 @@ export function DesktopApp() {
               <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.95fr)]">
                 <PdfFromDeck
                   deckId={activeDeck.id}
-                  pageNumber={activeSlide?.slideNumber ?? 1}
-                  onClick={() => setZoomPage(activeSlide?.slideNumber ?? 1)}
+                  pageNumber={currentPageNumber}
+                  onPageCount={handlePdfPageCount}
+                  onClick={() => openZoomOverlay(currentPageNumber)}
                 />
-                {activeSlide ? (
-                  <div className="rounded-lg border border-line bg-panel">
-                    <div className="flex items-center justify-between gap-3 border-b border-line p-4">
-                      <div className="min-w-0">
-                        <h2 className="text-lg font-semibold">Review script</h2>
-                        <p className="text-xs text-zinc-500">
-                          Editing {activeModePreset.label} transcript
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={saveActiveSlide}
-                        disabled={isBusy || !activeVariant}
-                        className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-white hover:bg-accent-strong"
-                      >
-                        <Save size={17} />
-                        Save
-                      </button>
+                <div className="rounded-lg border border-line bg-panel">
+                  <div className="flex items-center justify-between gap-3 border-b border-line p-4">
+                    <div className="min-w-0">
+                      <h2 className="text-lg font-semibold">Review script</h2>
+                      <p className="text-xs text-zinc-500">
+                        {activeSlide
+                          ? `Editing ${activeModePreset.label} transcript`
+                          : `Slide ${currentPageNumber} · No transcription yet`}
+                      </p>
                     </div>
-                    <div className="grid gap-4 p-4">
-                      <label className="grid gap-2 text-sm font-medium">
-                        Title
-                        <input
-                          value={activeSlide.title}
-                          onChange={(event) => updateLocalSlideTitle(event.target.value)}
-                          className="h-10 rounded-md border border-line px-3 outline-none focus:border-accent"
-                        />
-                      </label>
-
-                      {activeVariant ? (
-                        <>
-                          <label className="grid gap-2 text-sm font-medium">
-                            Transcript Markdown with LaTeX
-                            <textarea
-                              value={activeVariant.transcriptMarkdown}
-                              onChange={(event) =>
-                                updateLocalVariant({
-                                  transcriptMarkdown: event.target.value,
-                                  transcriptLatex: event.target.value,
-                                })
-                              }
-                              className="min-h-[9rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
-                            />
-                          </label>
-                          <label className="grid gap-2 text-sm font-medium">
-                            Speech text
-                            <textarea
-                              value={activeVariant.speechText}
-                              onChange={(event) =>
-                                updateLocalVariant({ speechText: event.target.value })
-                              }
-                              rows={5}
-                              className="min-h-[5rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
-                            />
-                          </label>
-                          <label className="grid gap-2 text-sm font-medium">
-                            Key terms, comma separated
-                            <input
-                              value={activeVariant.keyTerms.join(", ")}
-                              onChange={(event) =>
-                                updateLocalVariant({
-                                  keyTerms: event.target.value
-                                    .split(",")
-                                    .map((term) => term.trim())
-                                    .filter(Boolean),
-                                })
-                              }
-                              className="h-10 rounded-md border border-line px-3 outline-none focus:border-accent"
-                            />
-                          </label>
-                          <div className="rounded-md border border-line bg-panel-muted p-4">
-                            <p className="mb-2 text-sm font-semibold">Preview</p>
-                            <MarkdownTranscript
-                              markdown={activeVariant.transcriptMarkdown}
-                              latex={activeVariant.transcriptLatex}
-                              mathMode={settings.transcriptMathMode}
-                            />
-                          </div>
-                        </>
-                      ) : (
-                        <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-line bg-panel-muted px-6 py-10 text-center">
-                          <FileText className="text-zinc-400" size={28} />
-                          <p className="text-sm font-semibold text-zinc-700">
-                            No {activeModePreset.label} transcript yet
-                          </p>
-                          <p className="max-w-sm text-sm text-zinc-600">
-                            {activeModePreset.description} Use Generate above to create{" "}
-                            {activeModePreset.label} transcripts for this deck without touching
-                            other modes.
-                          </p>
-                          <button
-                            type="button"
-                            onClick={generateTranscripts}
-                            disabled={isBusy}
-                            className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-strong"
-                          >
-                            <Wand2 size={17} />
-                            Generate {activeModePreset.label}
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={saveActiveSlide}
+                      disabled={isBusy || !activeVariant}
+                      className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-white hover:bg-accent-strong"
+                    >
+                      <Save size={17} />
+                      Save
+                    </button>
                   </div>
-                ) : null}
+                  <div className="grid gap-4 p-4">
+                    {activeSlide ? (
+                      <>
+                        <label className="grid gap-2 text-sm font-medium">
+                          Title
+                          <input
+                            value={activeSlide.title}
+                            onChange={(event) => updateLocalSlideTitle(event.target.value)}
+                            className="h-10 rounded-md border border-line px-3 outline-none focus:border-accent"
+                          />
+                        </label>
+
+                        {activeVariant ? (
+                          <>
+                            <label className="grid gap-2 text-sm font-medium">
+                              Transcript Markdown with LaTeX
+                              <textarea
+                                value={activeVariant.transcriptMarkdown}
+                                onChange={(event) =>
+                                  updateLocalVariant({
+                                    transcriptMarkdown: event.target.value,
+                                    transcriptLatex: event.target.value,
+                                  })
+                                }
+                                className="min-h-[9rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
+                              />
+                            </label>
+                            <label className="grid gap-2 text-sm font-medium">
+                              Speech text
+                              <textarea
+                                value={activeVariant.speechText}
+                                onChange={(event) =>
+                                  updateLocalVariant({ speechText: event.target.value })
+                                }
+                                rows={5}
+                                className="min-h-[5rem] resize-y rounded-md border border-line bg-white px-3 py-2 caret-accent outline-none focus:border-accent"
+                              />
+                            </label>
+                            <label className="grid gap-2 text-sm font-medium">
+                              Key terms, comma separated
+                              <input
+                                value={activeVariant.keyTerms.join(", ")}
+                                onChange={(event) =>
+                                  updateLocalVariant({
+                                    keyTerms: event.target.value
+                                      .split(",")
+                                      .map((term) => term.trim())
+                                      .filter(Boolean),
+                                  })
+                                }
+                                className="h-10 rounded-md border border-line px-3 outline-none focus:border-accent"
+                              />
+                            </label>
+                            <div className="rounded-md border border-line bg-panel-muted p-4">
+                              <p className="mb-2 text-sm font-semibold">Preview</p>
+                              <MarkdownTranscript
+                                markdown={activeVariant.transcriptMarkdown}
+                                latex={activeVariant.transcriptLatex}
+                                mathMode={settings.transcriptMathMode}
+                              />
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-line bg-panel-muted px-6 py-10 text-center">
+                            <FileText className="text-zinc-400" size={28} />
+                            <p className="text-sm font-semibold text-zinc-700">
+                              No {activeModePreset.label} transcript yet
+                            </p>
+                            <p className="max-w-sm text-sm text-zinc-600">
+                              {activeModePreset.description} Use Generate above to create{" "}
+                              {activeModePreset.label} transcripts for this deck without touching
+                              other modes.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={generateTranscripts}
+                              disabled={isBusy}
+                              className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-strong"
+                            >
+                              <Wand2 size={17} />
+                              Generate {activeModePreset.label}
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-line bg-panel-muted px-6 py-10 text-center">
+                        <FileText className="text-zinc-400" size={28} />
+                        <p className="text-sm font-semibold text-zinc-700">
+                          No transcription for {currentSlideTitle}
+                        </p>
+                        <p className="max-w-sm text-sm text-zinc-600">
+                          You can browse the PDF slides here. Generate with Gemini or import from an
+                          external LLM to add teaching notes for this page.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={generateTranscripts}
+                          disabled={isBusy}
+                          className="inline-flex h-10 items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-strong"
+                        >
+                          <Wand2 size={17} />
+                          Generate transcripts
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </section>
             </div>
           </section>
@@ -1783,7 +1831,7 @@ export function DesktopApp() {
               </div>
             </header>
 
-            {activeSlide ? (
+            {deckSlideCount > 0 ? (
               <>
                 <main className="min-h-0 flex-1 overflow-hidden">
                   <section
@@ -1798,23 +1846,30 @@ export function DesktopApp() {
                         <p className="sticky top-0 z-10 border-b border-line bg-panel/95 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 backdrop-blur">
                           Slides
                         </p>
-                        {activeDeck.slides.map((slide, index) => (
+                        {slideListItems.map((item) => (
                           <button
-                            key={slide.slideNumber}
+                            key={item.slideNumber}
+                            ref={(node) => {
+                              if (node) {
+                                viewerSlideButtonRefs.current.set(item.index, node);
+                              } else {
+                                viewerSlideButtonRefs.current.delete(item.index);
+                              }
+                            }}
                             type="button"
-                            onClick={() => setActiveSlideIndex(index)}
-                            aria-current={index === activeSlideIndex}
+                            onClick={() => setActiveSlideIndex(item.index)}
+                            aria-current={item.index === activeSlideIndex}
                             className={`block w-full border-b border-line px-3 py-2.5 text-left text-sm transition-colors hover:bg-panel-muted ${
-                              index === activeSlideIndex
+                              item.index === activeSlideIndex
                                 ? "border-l-2 border-l-accent bg-panel-muted font-semibold"
                                 : "border-l-2 border-l-transparent"
                             }`}
                           >
-                            <span className={index === activeSlideIndex ? "text-accent" : "text-zinc-500"}>
-                              Slide {slide.slideNumber}
+                            <span className={item.index === activeSlideIndex ? "text-accent" : "text-zinc-500"}>
+                              Slide {item.slideNumber}
                             </span>
                             <span className="mt-0.5 block truncate text-zinc-600">
-                              {slide.title}
+                              {item.title}
                             </span>
                           </button>
                         ))}
@@ -1832,8 +1887,9 @@ export function DesktopApp() {
                         <div className="scroll-area min-h-0 min-w-0 overflow-auto pr-2">
                           <PdfFromDeck
                             deckId={activeDeck.id}
-                            pageNumber={activeSlide.slideNumber}
-                            onClick={() => setZoomPage(activeSlide.slideNumber)}
+                            pageNumber={currentPageNumber}
+                            onPageCount={handlePdfPageCount}
+                            onClick={() => openZoomOverlay(currentPageNumber)}
                           />
                         </div>
                         <button
@@ -1850,7 +1906,7 @@ export function DesktopApp() {
                               Transcript · {activeModePreset.label}
                             </p>
                             <h2 className="mt-0.5 text-lg font-semibold tracking-normal">
-                              {activeSlide.title}
+                              {currentSlideTitle}
                             </h2>
                           </div>
                           <div className="scroll-area min-h-0 flex-1 overflow-auto px-5 py-5">
@@ -1866,7 +1922,7 @@ export function DesktopApp() {
                               <div className="mx-auto flex max-w-sm flex-col items-center gap-3 py-10 text-center">
                                 <FileText className="text-zinc-400" size={28} />
                                 <p className="text-sm font-semibold text-zinc-700">
-                                  No transcript generated for this mode yet.
+                                  No {activeModePreset.label} transcript for this slide yet.
                                 </p>
                                 <p className="text-sm text-zinc-600">
                                   {activeModePreset.description} Open Edit scripts and generate the{" "}
@@ -1895,10 +1951,11 @@ export function DesktopApp() {
                       >
                         <PdfFromDeck
                           deckId={activeDeck.id}
-                          pageNumber={activeSlide.slideNumber}
+                          pageNumber={currentPageNumber}
+                          onPageCount={handlePdfPageCount}
                           fitMode={viewerImmersive ? "contain" : "width"}
                           className={viewerImmersive ? "h-full w-full" : ""}
-                          onClick={() => setZoomPage(activeSlide.slideNumber)}
+                          onClick={() => openZoomOverlay(currentPageNumber)}
                         />
                       </div>
                     )}
@@ -1941,10 +1998,10 @@ export function DesktopApp() {
                       type="button"
                       onClick={() =>
                         setActiveSlideIndex((current) =>
-                          Math.min(activeDeck.slides.length - 1, current + 1),
+                          Math.min(deckSlideCount - 1, current + 1),
                         )
                       }
-                      disabled={activeSlideIndex >= activeDeck.slides.length - 1}
+                      disabled={activeSlideIndex >= deckSlideCount - 1}
                       className="inline-flex h-10 shrink-0 items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white hover:bg-accent-strong"
                     >
                       Next
@@ -1954,7 +2011,7 @@ export function DesktopApp() {
               </>
             ) : (
               <p className="rounded-lg border border-line bg-panel p-5 text-sm text-zinc-600">
-                This deck has no generated slide transcripts yet.
+                Loading PDF pages...
               </p>
             )}
           </section>
@@ -1962,8 +2019,8 @@ export function DesktopApp() {
 
         {zoomPage && activeDeck ? (
           <div className="fixed inset-0 z-50 grid bg-black/70 p-5">
-            <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] rounded-lg bg-background">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-panel p-3">
+            <div className="flex h-[calc(100vh-2.5rem)] min-h-0 flex-col rounded-lg bg-background">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line bg-panel p-3">
                 <div className="text-sm font-semibold">
                   {activeDeck.title} - slide {zoomPage}
                 </div>
@@ -1994,7 +2051,7 @@ export function DesktopApp() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setZoomPage(null)}
+                    onClick={closeZoomOverlay}
                     className="inline-flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-white hover:bg-accent-strong"
                   >
                     <X size={16} />
@@ -2002,14 +2059,14 @@ export function DesktopApp() {
                   </button>
                 </div>
               </div>
-              <div className="min-h-0 overflow-auto p-4">
-                <div className="flex min-h-full min-w-full items-center justify-center">
+              <div className="min-h-0 flex-1 overflow-hidden p-4">
+                <div className="h-full w-full">
                   <PdfFromDeck
                     deckId={activeDeck.id}
                     pageNumber={zoomPage}
                     fitMode="contain"
                     scaleMultiplier={zoomScale}
-                    className="h-full w-full max-h-full border-0 bg-transparent"
+                    className="h-full w-full border-0 bg-transparent"
                   />
                 </div>
               </div>
