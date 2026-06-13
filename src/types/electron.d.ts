@@ -5,6 +5,7 @@ import type {
   DeckManifest,
   DeckSummary,
   SlideTranscript,
+  TranscriptGenerationOptions,
 } from "@/lib/types";
 import type { TranscriptMode } from "@/lib/transcriptModes";
 
@@ -31,6 +32,7 @@ export type SlideTutorDesktopApi = {
   generateTranscripts: (
     deckId: string,
     mode: TranscriptMode,
+    options: TranscriptGenerationOptions,
   ) => Promise<DesktopApiResult<DeckManifest>>;
   saveSlide: (
     deckId: string,
@@ -44,6 +46,7 @@ export type SlideTutorDesktopApi = {
     deckId: string,
     slides: ImportedSlideInput[],
     mode: TranscriptMode,
+    options: TranscriptGenerationOptions,
   ) => Promise<DesktopApiResult<DeckManifest>>;
   renameDeck: (deckId: string, title: string) => Promise<DesktopApiResult<DeckManifest>>;
   deleteDeck: (deckId: string) => Promise<DesktopApiResult<void>>;

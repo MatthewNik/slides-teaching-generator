@@ -10,15 +10,20 @@ export type TranscriptMode = (typeof TRANSCRIPT_MODES)[number];
 
 export const DEFAULT_TRANSCRIPT_MODE: TranscriptMode = "summary";
 
+export type SpeechPromptVariants = {
+  withSpeech: string;
+  withoutSpeech: string;
+};
+
 export type TranscriptModePreset = {
   /** Short name shown in the dropdown. */
   label: string;
   /** One-line tooltip shown on the info icon. */
   description: string;
   /** Instruction text injected into the Gemini prompt. */
-  promptInstructions: string;
-  /** Instruction text injected into the external LLM (ChatGPT) prompt. */
-  externalPromptInstructions: string;
+  promptInstructions: SpeechPromptVariants;
+  /** Instruction text injected into the external LLM prompt. */
+  externalPromptInstructions: SpeechPromptVariants;
   /** Target length guidance shared by Gemini and external LLM prompts. */
   lengthGuidance: string;
 };
@@ -27,52 +32,92 @@ export const TRANSCRIPT_MODE_PRESETS: Record<TranscriptMode, TranscriptModePrese
   summary: {
     label: "Summary Explanation",
     description: "Concise overview of the slide.",
-    promptInstructions:
-      "Generate a high-level teaching transcript. Explain the main idea, key terms, diagrams, equations, or examples in enough detail that a student truly learns from the slide—not just reads it off. End with the main takeaway.",
-    externalPromptInstructions:
-      "Write a high-level summary explanation. Cover the main idea, key terms, diagrams, equations, and examples visible on the slide. Focus on what the student should understand and remember, not on repeating every bullet verbatim.",
+    promptInstructions: {
+      withSpeech:
+        "Generate a concise slide overview plus a separate plain speech transcript. Explain what the slide is about, the main idea a student should take away, and how the visible text or diagram fits into the lesson. Do not derive formulas or copy long equations.",
+      withoutSpeech:
+        "Generate only a concise slide overview for reading on screen. Explain what the slide is about, the main idea a student should take away, and how the visible text or diagram fits into the lesson. Do not create narration, derive formulas, or copy long equations.",
+    },
+    externalPromptInstructions: {
+      withSpeech:
+        "Write a concise slide overview and a separate speech transcript. Explain what the slide is about and the main takeaway. Mention a formula only if it is essential to identify the slide's point, and do not work through derivations.",
+      withoutSpeech:
+        "Write only a concise slide overview. Explain what the slide is about and the main takeaway. Mention a formula only if it is essential to identify the slide's point, and do not write narration or work through derivations.",
+    },
     lengthGuidance:
-      "Aim for roughly 180 to 280 words per slide (about 90 to 140 seconds when spoken). Be thorough enough to teach the material, not just skim it.",
+      "Aim for roughly 90 to 140 words per slide. Keep it focused on the slide's purpose, not every detail.",
   },
   conceptual: {
     label: "Conceptual Deep Dive",
-    description: "Explains the why behind the slide.",
-    promptInstructions:
-      "Generate a deeper conceptual explanation. Explain why the topic matters, how the ideas connect, what the intuition is, what assumptions are being made, and what common misunderstandings students may have. Go into more detail than a summary.",
-    externalPromptInstructions:
-      "Write a longer conceptual deep dive. Explain why the topic matters, how the ideas connect, what the physical or mathematical intuition is, and what common misunderstandings students may have. Prioritize understanding over brevity.",
+    description: "Short theoretical explanation.",
+    promptInstructions: {
+      withSpeech:
+        "Generate a short theoretical explanation plus a separate plain speech transcript. Focus on the concept behind the slide: what idea it introduces, why it matters, and how to think about it intuitively. Do not derive formulas, solve examples, or copy long equations.",
+      withoutSpeech:
+        "Generate only a short theoretical explanation for reading on screen. Focus on the concept behind the slide: what idea it introduces, why it matters, and how to think about it intuitively. Do not create narration, derive formulas, solve examples, or copy long equations.",
+    },
+    externalPromptInstructions: {
+      withSpeech:
+        "Write a short theoretical explanation and a separate speech transcript. Focus on the idea behind the slide and the intuition a student should understand. Do not derive formulas, solve examples, or copy long equations.",
+      withoutSpeech:
+        "Write only a short theoretical explanation. Focus on the idea behind the slide and the intuition a student should understand. Do not write narration, derive formulas, solve examples, or copy long equations.",
+    },
     lengthGuidance:
-      "Aim for roughly 280 to 400 words per slide (about 140 to 200 seconds when spoken). This mode should be noticeably longer and more detailed than a summary.",
+      "Use no more than 150 words per slide. Keep this mode theoretical and concise.",
   },
   beginnerTechnical: {
     label: "Beginner + Technical",
     description: "Simple first, technical second.",
-    promptInstructions:
-      "Generate a two-level explanation. First explain the slide in beginner-friendly language with an analogy or plain-language intuition. Then explain it again using the proper technical terminology, formulas, and relationships from the slide.",
-    externalPromptInstructions:
-      "Write a two-part explanation. Part 1: explain the slide in beginner-friendly language using an analogy or everyday intuition. Part 2: explain the same content again with proper technical terminology, formulas, and relationships shown on the slide.",
+    promptInstructions: {
+      withSpeech:
+        "Generate a two-part slide overview plus a separate plain speech transcript. First explain the slide in plain beginner language. Then add a brief technical framing using the terms visible on the slide. Do not derive formulas or copy long equations.",
+      withoutSpeech:
+        "Generate only a two-part slide overview for reading on screen. First explain the slide in plain beginner language. Then add a brief technical framing using the terms visible on the slide. Do not create narration, derive formulas, or copy long equations.",
+    },
+    externalPromptInstructions: {
+      withSpeech:
+        "Write a two-part slide overview and a separate speech transcript. Part 1: plain beginner explanation of what the slide is about. Part 2: brief technical framing using the slide's terms. Avoid derivations and long equations.",
+      withoutSpeech:
+        "Write only a two-part slide overview. Part 1: plain beginner explanation of what the slide is about. Part 2: brief technical framing using the slide's terms. Do not write narration, derivations, or long equations.",
+    },
     lengthGuidance:
-      "Aim for roughly 250 to 380 words per slide (about 125 to 190 seconds when spoken). Both the beginner and technical sections should be substantive.",
+      "Aim for roughly 120 to 180 words per slide across both parts.",
   },
   examFocused: {
     label: "Exam-Focused",
-    description: "Focuses on testable material.",
-    promptInstructions:
-      "Generate a transcript focused on quizzes and exams. For each formula or definition on the slide, state its name and what it is used for, then present the formula. Also cover assumptions, common question types, likely mistakes, and the main exam takeaway.",
-    externalPromptInstructions:
-      "Write an exam-focused explanation. For every formula, definition, or key relationship on the slide: first name it and explain what it is used for, then give the formula in proper LaTeX. Also note assumptions, common exam question styles, likely mistakes, and the main takeaway.",
+    description: "Focuses on what to notice for tests.",
+    promptInstructions: {
+      withSpeech:
+        "Generate an exam-oriented slide overview plus a separate plain speech transcript. Explain what a student should recognize from this slide, what idea could be tested, and any common trap. Mention formulas only by purpose unless the exact expression is central.",
+      withoutSpeech:
+        "Generate only an exam-oriented slide overview for reading on screen. Explain what a student should recognize from this slide, what idea could be tested, and any common trap. Do not create narration, derive formulas, or copy long equations.",
+    },
+    externalPromptInstructions: {
+      withSpeech:
+        "Write an exam-oriented slide overview and a separate speech transcript. State what the slide is testing or preparing the student to recognize. Mention formulas only by purpose unless the exact expression is central.",
+      withoutSpeech:
+        "Write only an exam-oriented slide overview. State what the slide is testing or preparing the student to recognize. Do not write narration, derivations, or long equations.",
+    },
     lengthGuidance:
-      "Aim for roughly 220 to 340 words per slide (about 110 to 170 seconds when spoken). Cover every testable item on the slide.",
+      "Aim for roughly 100 to 160 words per slide. Keep the focus on recognition and takeaway.",
   },
   stepByStep: {
     label: "Step-by-Step Solver",
-    description: "Best for examples and calculations.",
-    promptInstructions:
-      "Generate a step-by-step teaching transcript. If the slide contains a worked example, derivation, circuit, diagram, process, or calculation, explain every step clearly without skipping reasoning. Annotate examples by answering why each step is done that way.",
-    externalPromptInstructions:
-      "Write a step-by-step technical explanation. If the slide has a worked example, derivation, diagram, process, or calculation, walk through every step in order. For each step, explain what is being done and why that approach is used. Do not skip intermediate reasoning.",
+    description: "Best for process slides.",
+    promptInstructions: {
+      withSpeech:
+        "Generate a process-focused slide overview plus a separate plain speech transcript. If the slide shows a procedure or example, summarize the high-level sequence and purpose of each stage. Do not perform derivations or detailed calculations.",
+      withoutSpeech:
+        "Generate only a process-focused slide overview for reading on screen. If the slide shows a procedure or example, summarize the high-level sequence and purpose of each stage. Do not create narration, perform derivations, or do detailed calculations.",
+    },
+    externalPromptInstructions: {
+      withSpeech:
+        "Write a process-focused slide overview and a separate speech transcript. Summarize the visible sequence or example at a high level. Do not solve the example in detail or derive formulas.",
+      withoutSpeech:
+        "Write only a process-focused slide overview. Summarize the visible sequence or example at a high level. Do not write narration, solve the example in detail, or derive formulas.",
+    },
     lengthGuidance:
-      "Aim for roughly 300 to 450 words per slide (about 150 to 225 seconds when spoken). Worked examples should be explained step by step with annotations.",
+      "Aim for roughly 120 to 180 words per slide. Keep steps high-level and tied to what is visible.",
   },
 };
 

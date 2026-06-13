@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
-import type { AppSettings } from "../src/lib/types";
+import type { AppSettings, TranscriptGenerationOptions } from "../src/lib/types";
 import type { TranscriptMode } from "../src/lib/transcriptModes";
 import type {
   ImportedSlideInput,
@@ -15,8 +15,11 @@ const api: SlideTutorDesktopApi = {
     ipcRenderer.invoke("decks:create-from-pdf-path", sourcePath, title),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   getDeck: (deckId: string) => ipcRenderer.invoke("decks:get", deckId),
-  generateTranscripts: (deckId: string, mode: TranscriptMode) =>
-    ipcRenderer.invoke("decks:generate-transcripts", deckId, mode),
+  generateTranscripts: (
+    deckId: string,
+    mode: TranscriptMode,
+    options: TranscriptGenerationOptions,
+  ) => ipcRenderer.invoke("decks:generate-transcripts", deckId, mode, options),
   saveSlide: (
     deckId: string,
     slideNumber: number,
@@ -25,8 +28,12 @@ const api: SlideTutorDesktopApi = {
   ) => ipcRenderer.invoke("decks:save-slide", deckId, slideNumber, update, mode),
   publishDeck: (deckId: string) => ipcRenderer.invoke("decks:publish", deckId),
   reformatDeckMath: (deckId: string) => ipcRenderer.invoke("decks:reformat-math", deckId),
-  importExternalTranscripts: (deckId: string, slides: ImportedSlideInput[], mode: TranscriptMode) =>
-    ipcRenderer.invoke("decks:import-external-transcripts", deckId, slides, mode),
+  importExternalTranscripts: (
+    deckId: string,
+    slides: ImportedSlideInput[],
+    mode: TranscriptMode,
+    options: TranscriptGenerationOptions,
+  ) => ipcRenderer.invoke("decks:import-external-transcripts", deckId, slides, mode, options),
   renameDeck: (deckId: string, title: string) =>
     ipcRenderer.invoke("decks:rename", deckId, title),
   deleteDeck: (deckId: string) => ipcRenderer.invoke("decks:delete", deckId),

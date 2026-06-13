@@ -41,6 +41,24 @@ function hasMathDelimiters(text: string) {
   return MATH_DELIMITER_PATTERN.test(text);
 }
 
+function proseSignalFromMath(inner: string) {
+  return inner
+    .replace(/\\text\{([^}]*)\}/g, " $1 ")
+    .replace(/\\[a-zA-Z]+/g, " ")
+    .replace(/[{}_^=+\-*/<>()[\],.;:0-9|\\]/g, " ")
+    .trim();
+}
+
+function looksLikeProseInsideMath(inner: string) {
+  const signal = proseSignalFromMath(inner);
+  if (!signal) return false;
+
+  const words = signal.split(/\s+/).filter(Boolean);
+  if (words.length >= 5) return true;
+
+  return /[A-Za-z]{18,}/.test(signal);
+}
+
 function countLatexCommands(text: string) {
   return (text.match(/\\[a-zA-Z]+/g) ?? []).length;
 }
@@ -78,16 +96,16 @@ export function looksLikeLatexMath(text: string) {
 function unwrapProseMathDelimiters(text: string) {
   return text
     .replace(/\$\$([\s\S]+?)\$\$/g, (match, inner: string) =>
-      looksLikeLatexMath(inner) ? match : inner.trim(),
+      looksLikeProseInsideMath(inner) || !looksLikeLatexMath(inner) ? inner.trim() : match,
     )
     .replace(/\$([^$\n]+)\$/g, (match, inner: string) =>
-      looksLikeLatexMath(inner) ? match : inner.trim(),
+      looksLikeProseInsideMath(inner) || !looksLikeLatexMath(inner) ? inner.trim() : match,
     )
     .replace(/\\\(([\s\S]+?)\\\)/g, (match, inner: string) =>
-      looksLikeLatexMath(inner) ? match : inner.trim(),
+      looksLikeProseInsideMath(inner) || !looksLikeLatexMath(inner) ? inner.trim() : match,
     )
     .replace(/\\\[([\s\S]+?)\\\]/g, (match, inner: string) =>
-      looksLikeLatexMath(inner) ? match : inner.trim(),
+      looksLikeProseInsideMath(inner) || !looksLikeLatexMath(inner) ? inner.trim() : match,
     );
 }
 
@@ -164,8 +182,15 @@ function stripHeadingFromMathLine(line: string) {
   return line;
 }
 
+function normalizePastedMathArtifacts(markdown: string) {
+  return markdown
+    .replace(/\\([a-zA-Z]+)\$\$\\([a-zA-Z]+)/g, "\\$1 \\$2")
+    .replace(/\$\$\\([a-zA-Z]+)/g, "\\$1")
+    .replace(/\\([a-zA-Z]+)\$\$/g, "\\$1");
+}
+
 function sanitizeImportMarkdown(markdown: string) {
-  return stripMarkdownArtifacts(markdown)
+  return normalizePastedMathArtifacts(stripMarkdownArtifacts(markdown))
     .split("\n")
     .map((line) => stripHeadingFromMathLine(line))
     .join("\n");
@@ -181,8 +206,16 @@ function wrapUndelimitedDisplayEquations(markdown: string) {
       const hasEquals = trimmed.includes("=");
       const hasLatexCommand = /\\[a-zA-Z]+|\\frac|\\left|\\right/.test(trimmed);
       const hasSubSuper = /_[A-Za-z0-9{]|\^[A-Za-z0-9{]/.test(trimmed);
+      const hasComparison = /[<>]/.test(trimmed);
+      const looksLikeRawFormula =
+        /^[A-Za-z](?:_[{]?[A-Za-z0-9,\\{}]+[}]?)?\s*\([^)]*\)\s*=/.test(trimmed) ||
+        /^[A-Za-z](?:_[{]?[A-Za-z0-9,\\{}]+[}]?)?\s*=/.test(trimmed);
 
       if (hasEquals && (hasLatexCommand || hasSubSuper)) {
+        return `$$${trimmed}$$`;
+      }
+
+      if (looksLikeRawFormula && (hasComparison || hasLatexCommand || hasSubSuper)) {
         return `$$${trimmed}$$`;
       }
 

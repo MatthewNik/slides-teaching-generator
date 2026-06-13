@@ -1,18 +1,51 @@
-import { SLIDE_DELIMITER } from "./importTranscripts";
+import { slideEndMarker, slideStartMarker } from "./importTranscripts";
 import {
   TRANSCRIPT_MODE_PRESETS,
   type TranscriptMode,
 } from "./transcriptModes";
-import type { DeckManifest } from "./types";
+import type { DeckManifest, TranscriptGenerationOptions } from "./types";
 
 function expectedSlideCountLabel(deck: DeckManifest) {
   const count = deck.slides.length || deck.pageCount;
   return count && count > 0 ? String(count) : "the same number of pages as the attached PDF";
 }
 
-export function buildExternalLlmPrompt(deck: DeckManifest, mode: TranscriptMode) {
+function speechRules(includeSpeech: boolean) {
+  if (!includeSpeech) {
+    return `- Do not include a ---SPEECH--- section.
+- Do not write any text-to-speech narration. Only create the Markdown teaching transcript.`;
+  }
+
+  return `- Put plain spoken narration in the ---SPEECH--- section. Do not use raw LaTeX in speech text. Verbalize equations naturally.`;
+}
+
+function exampleSlideBlock(slideNumber: number, includeSpeech: boolean) {
+  const start = slideStartMarker(slideNumber);
+  const end = slideEndMarker(slideNumber);
+  const speechSection = includeSpeech
+    ? `
+---SPEECH---
+Plain narration with no LaTeX, for example: This slide introduces the main idea and explains why it matters before the next slide adds detail.
+`
+    : "";
+
+  return `${start}
+TITLE: Short teaching title for slide ${slideNumber}
+
+---MARKDOWN---
+Teacher-facing slide overview in Markdown, for example: This slide introduces the main idea and explains why it matters before the next slide adds detail.
+${speechSection}
+${end}`;
+}
+
+export function buildExternalLlmPrompt(
+  deck: DeckManifest,
+  mode: TranscriptMode,
+  options: TranscriptGenerationOptions = { includeSpeech: false },
+) {
   const slideCount = expectedSlideCountLabel(deck);
   const preset = TRANSCRIPT_MODE_PRESETS[mode];
+  const promptVariant = options.includeSpeech ? "withSpeech" : "withoutSpeech";
 
   return `You are creating teaching notes for a PDF slide deck named "${deck.title}".
 
@@ -23,50 +56,42 @@ Create exactly ${slideCount} slide blocks, one per PDF page, in page order.
 For each slide, explain what is visible on that page for a student learning without a live instructor.
 
 Transcript style: ${preset.label}.
-${preset.externalPromptInstructions}
+${preset.externalPromptInstructions[promptVariant]}
 
 Output rules:
-- Use the exact format below for every slide.
-- Put Markdown with LaTeX in the ---MARKDOWN--- section. Use \\( ... \\) for inline math and $$ ... $$ on their own lines for display equations.
-- Every equation, variable, subscript, superscript, fraction, and symbol must be written as proper LaTeX inside those delimiters. Do not write plain-text or Unicode math such as Ploss=IRMS2R, P_loss=I_RMS^2 R, or pasted subscript characters.
-- Every standalone equation must appear on its own line wrapped in $$ ... $$ with valid LaTeX inside.
-- Parenthetical notation such as (D_1), (i_s), (R), and (V_C) is accepted for inline references, but full equations should still use $$ ... $$ blocks with valid LaTeX such as $$P_\\text{loss} = I_\\text{RMS}^2 R$$.
-- Use LaTeX commands for notation, for example \\(P_\\text{loss} = I_\\text{RMS}^2 R\\), \\(V_o\\), \\(\\Delta V_o\\), \\(\\cos\\phi\\), and \\(\\frac{L}{R}\\).
-- Put plain spoken narration in the ---SPEECH--- section. Do not use raw LaTeX in speech text. Verbalize equations naturally.
+- Return the entire response inside one plain-text code block using triple backticks. Do not put commentary before or after the code block.
+- Use the exact paired slide markers shown below.
+- Every slide block must start with ${slideStartMarker(1).replace("001", "NNN")} and end with ${slideEndMarker(1).replace("001", "NNN")}, where NNN is the zero-padded 1-based slide number.
+- Inside the code block, do not put any text outside the paired slide markers.
+- Put the slide overview in the ---MARKDOWN--- section.
+- Focus on what the slide is about, the intuition, and the takeaway. Do not derive formulas or copy long equations.
+- Mention formulas only briefly when they are central to the slide.
+- If a short formula is truly needed, put it on its own line inside $$ ... $$ with valid LaTeX. Do not use raw formula text like V_{d,\\text{avg}}=... outside math delimiters.
+- Never put ordinary prose inside math delimiters. Sentences must stay as normal text.
+${speechRules(options.includeSpeech)}
 - ${preset.lengthGuidance}
 - Do not use markdown headings (#, ##, etc.), horizontal rules, or decorative lines of repeated = or - characters inside ---MARKDOWN---.
-- After every slide block except the last, put exactly 10 commas on their own line as the slide separator.
+- Slide markers must be sequential: ${slideStartMarker(1)}, ${slideEndMarker(1)}, then ${slideStartMarker(2)}, ${slideEndMarker(2)}, and so on.
 
 Exact format to follow:
 
-========== SLIDE 1 ==========
-TITLE: Short teaching title for slide 1
+${exampleSlideBlock(1, options.includeSpeech)}
 
----MARKDOWN---
-Teacher-facing explanation in Markdown with LaTeX, for example: The gain is \\(K_p\\), the phase depends on \\(\\omega t\\), and conduction loss is \\(P_\\text{loss} = I_\\text{RMS}^2 R\\).
-
----SPEECH---
-Plain narration with no LaTeX, for example: The gain K sub p, the phase depends on omega t, and conduction loss is P loss equals I R M S squared times R.
-
-${SLIDE_DELIMITER}
-
-========== SLIDE 2 ==========
-TITLE: Short teaching title for slide 2
-
----MARKDOWN---
-...
-
----SPEECH---
-...
+${exampleSlideBlock(2, options.includeSpeech).replace(
+  "Teacher-facing slide overview in Markdown, for example: This slide introduces the main idea and explains why it matters before the next slide adds detail.",
+  "...",
+).replace(
+  "Plain narration with no LaTeX, for example: This slide introduces the main idea and explains why it matters before the next slide adds detail.",
+  "...",
+)}
 
 Repeat this pattern for every slide in the PDF.
 
 Important:
-- Do not add extra commentary before or after the slide blocks.
-- Do not skip the ---MARKDOWN--- or ---SPEECH--- markers.
-- In ---MARKDOWN---, never leave equations as plain text or Unicode subscripts/superscripts. Always convert them to renderable LaTeX inside \\( ... \\) or $$ ... $$.
-- Bad: Ploss=IRMS2R, I_RMS, v_o(t), ΔV_o without delimiters, or lines like ========== or ## inside markdown.
-- Good: \\(P_\\text{loss} = I_\\text{RMS}^2 R\\), \\(I_\\text{RMS}\\), \\(v_o(t)\\), \\(\\Delta V_o\\), and display equations on their own line inside $$ ... $$.
-- Use exactly this separator between slides, on its own line: ${SLIDE_DELIMITER}
+- Do not add extra commentary before or after the code block.
+${options.includeSpeech ? "- Do not skip the ---MARKDOWN--- or ---SPEECH--- markers." : "- Do not skip the ---MARKDOWN--- marker, and do not include a ---SPEECH--- marker."}
+- In ---MARKDOWN---, keep prose as normal text. Use math delimiters only for actual formulas.
+- Bad: copying a long equation from the slide when it is not needed, putting a sentence inside $$...$$, or lines like ========== or ## inside markdown.
+- Good: "This slide shows that delaying the waveform shifts each harmonic, so no extra delay calculation is needed."
 - Match the number of slides to the PDF page count.`;
 }

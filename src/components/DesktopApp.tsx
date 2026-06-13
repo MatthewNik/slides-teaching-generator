@@ -39,6 +39,7 @@ import type {
   DeckSummary,
   SlideTranscript,
   SlideTranscriptVariant,
+  TranscriptGenerationOptions,
 } from "@/lib/types";
 import {
   DEFAULT_TRANSCRIPT_MODE,
@@ -582,6 +583,7 @@ export function DesktopApp() {
   const [isBusy, setIsBusy] = useState(false);
   const [zoomPage, setZoomPage] = useState<number | null>(null);
   const [zoomScale, setZoomScale] = useState(1);
+  const [includeSpeechTranscript, setIncludeSpeechTranscript] = useState(false);
 
   const activeSlide = activeDeck?.slides[activeSlideIndex];
   const transcriptMode = settings.transcriptMode;
@@ -857,19 +859,30 @@ export function DesktopApp() {
 
     const mode = settings.transcriptMode;
     const presetLabel = TRANSCRIPT_MODE_PRESETS[mode].label;
+    const options: TranscriptGenerationOptions = {
+      includeSpeech: includeSpeechTranscript,
+    };
 
     setIsBusy(true);
-    showMessage(`Generating ${presetLabel} transcripts with Gemini...`);
+    showMessage(
+      `Generating ${presetLabel} transcripts with Gemini${
+        options.includeSpeech ? " with speech text" : " without speech text"
+      }...`,
+    );
 
     try {
-      const result = await desktopApi().generateTranscripts(activeDeck.id, mode);
+      const result = await desktopApi().generateTranscripts(activeDeck.id, mode, options);
 
       if (!result.ok) throw new Error(result.error);
 
       setActiveDeck(result.data);
       setEditingDeckTitle(result.data.title);
       setActiveSlideIndex(0);
-      showMessage(`${presetLabel} transcripts generated. Review and edit before publishing.`);
+      showMessage(
+        `${presetLabel} transcripts generated${
+          options.includeSpeech ? " with speech text" : " without speech text"
+        }. Review and edit before publishing.`,
+      );
       await loadDecks();
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "Could not generate transcripts.", { isError: true });
@@ -881,15 +894,25 @@ export function DesktopApp() {
   async function importExternalTranscripts(
     slides: ImportedSlideInput[],
     mode: TranscriptMode,
+    options: TranscriptGenerationOptions,
   ) {
     if (!activeDeck) return;
 
     setIsBusy(true);
     const presetLabel = TRANSCRIPT_MODE_PRESETS[mode].label;
-    showMessage(`Importing ${presetLabel} transcripts...`);
+    showMessage(
+      `Importing ${presetLabel} transcripts${
+        options.includeSpeech ? " with speech text" : " without speech text"
+      }...`,
+    );
 
     try {
-      const result = await desktopApi().importExternalTranscripts(activeDeck.id, slides, mode);
+      const result = await desktopApi().importExternalTranscripts(
+        activeDeck.id,
+        slides,
+        mode,
+        options,
+      );
 
       if (!result.ok) throw new Error(result.error);
 
@@ -897,7 +920,9 @@ export function DesktopApp() {
       setEditingDeckTitle(result.data.title);
       setActiveSlideIndex(0);
       showMessage(
-        `Updated ${presetLabel} transcripts for ${slides.length} slides. Review and publish when ready.`,
+        `Updated ${presetLabel} transcripts for ${slides.length} slides${
+          options.includeSpeech ? " with speech text" : " without speech text"
+        }. Review and publish when ready.`,
       );
       await loadDecks();
     } catch (error) {
@@ -951,7 +976,7 @@ export function DesktopApp() {
     const mode = settings.transcriptMode;
     const variant = resolveVariant(activeSlide, mode);
 
-    if (!variant || !variant.transcriptMarkdown.trim() || !variant.speechText.trim()) {
+    if (!variant || !variant.transcriptMarkdown.trim()) {
       showMessage(
         `Generate a ${TRANSCRIPT_MODE_PRESETS[mode].label} transcript for this slide before saving.`,
         { isError: true },
@@ -1566,6 +1591,26 @@ export function DesktopApp() {
                     </button>
                     <button
                       type="button"
+                      onClick={() =>
+                        setIncludeSpeechTranscript((current) => !current)
+                      }
+                      aria-pressed={includeSpeechTranscript}
+                      title={
+                        includeSpeechTranscript
+                          ? "Speech transcript on"
+                          : "Speech transcript off"
+                      }
+                      className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold ${
+                        includeSpeechTranscript
+                          ? "border-accent bg-accent/10 text-accent"
+                          : "border-line bg-panel hover:bg-panel-muted"
+                      }`}
+                    >
+                      {includeSpeechTranscript ? <FileAudio size={17} /> : <FileText size={17} />}
+                      {includeSpeechTranscript ? "Speech on" : "Speech off"}
+                    </button>
+                    <button
+                      type="button"
                       onClick={generateTranscripts}
                       disabled={isBusy}
                       className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel-muted"
@@ -1611,7 +1656,9 @@ export function DesktopApp() {
                 </div>
                 <p className="text-sm text-zinc-600">
                   Generate creates <span className="font-semibold">{activeModePreset.label}</span>{" "}
-                  transcripts for every slide. Other modes are kept separately.
+                  transcripts for every slide
+                  {includeSpeechTranscript ? " with speech text" : " without speech text"}.
+                  Other modes are kept separately.
                 </p>
               </div>
 

@@ -8,6 +8,8 @@ import { normalizeMathFragments } from "../src/lib/mathNormalize";
 import {
   geminiJsonSchema,
   geminiSlidesResponseSchema,
+  geminiTeachingOnlyJsonSchema,
+  geminiTeachingOnlySlidesResponseSchema,
   importExternalTranscriptsSchema,
   slideUpdateSchema,
 } from "../src/lib/schemas";
@@ -21,6 +23,7 @@ import type {
   FolderIndex,
   SlideTranscript,
   SlideTranscriptVariant,
+  TranscriptGenerationOptions,
 } from "../src/lib/types";
 import {
   TRANSCRIPT_MODE_PRESETS,
@@ -434,8 +437,22 @@ async function choosePdfAndCreateDeck(title: string, window: BrowserWindow) {
   return createDeckFromPdfPath(choice.filePaths[0], title);
 }
 
-function buildGeminiPrompt(deck: DeckManifest, mode: TranscriptMode) {
+function normalizeTranscriptGenerationOptions(
+  options?: Partial<TranscriptGenerationOptions>,
+): TranscriptGenerationOptions {
+  return { includeSpeech: options?.includeSpeech ?? false };
+}
+
+function buildGeminiPrompt(
+  deck: DeckManifest,
+  mode: TranscriptMode,
+  options: TranscriptGenerationOptions,
+) {
   const preset = TRANSCRIPT_MODE_PRESETS[mode];
+  const promptVariant = options.includeSpeech ? "withSpeech" : "withoutSpeech";
+  const speechRequirement = options.includeSpeech
+    ? '- speechText must be plain narration for text-to-speech. Do not include raw LaTeX commands. Read equations naturally, e.g. "K sub p equals the limit as s approaches zero of G of s."'
+    : "- Do not create speechText or any text-to-speech narration. The response schema has no speechText field.";
 
   return `
 You are creating teaching notes for a PDF slide deck named "${deck.title}".
@@ -445,23 +462,29 @@ For every PDF page, create exactly one slide transcript object. The result must 
 Write for a student who is learning from the slide without a live instructor.
 
 Transcript style: ${preset.label}.
-${preset.promptInstructions}
+${preset.promptInstructions[promptVariant]}
 
 Requirements:
 - Explain the visible content on the slide, not generic background only.
-- If formulas or symbols appear, render them in transcriptMarkdown using LaTeX delimiters such as \\( ... \\) or $$ ... $$.
-- Never leave raw formula fragments undelimited in transcriptMarkdown. Prefer \\(V_o\\), \\(\\omega t\\), \\(\\sqrt{x}\\), and \\(K_p\\) instead of plain V_o, \\omega t, sqrt, or K_p.
-- Example transcriptMarkdown sentence: "The gain is \\(K_p\\) and the phase depends on \\(\\omega t\\)."
-- transcriptLatex should preserve the mathematical notation clearly.
-- speechText must be plain narration for text-to-speech. Do not include raw LaTeX commands. Read equations naturally, e.g. "K sub p equals the limit as s approaches zero of G of s."
+- Focus on what this slide is about and why it matters in the lesson.
+- Do not derive formulas or walk through long calculations.
+- Mention formulas only briefly when they are central to the slide, and prefer plain language over copying equations.
+- If a short formula must be included, render it with LaTeX delimiters such as \\( ... \\) or $$ ... $$, and never put ordinary prose inside math delimiters.
+- transcriptLatex should match transcriptMarkdown unless a short formula needs clearer notation.
+${speechRequirement}
 - ${preset.lengthGuidance}
-- Include key terms, variables, and formulas in keyTerms.
+- Include a few key terms or slide concepts in keyTerms.
 - Set generationStatus to "generated".
 `;
 }
 
-async function generateTranscripts(deckId: string, modeInput: TranscriptMode) {
+async function generateTranscripts(
+  deckId: string,
+  modeInput: TranscriptMode,
+  optionsInput?: Partial<TranscriptGenerationOptions>,
+) {
   const mode = coerceTranscriptMode(modeInput);
+  const options = normalizeTranscriptGenerationOptions(optionsInput);
   const settings = await getSettings();
   const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY;
 
@@ -501,14 +524,16 @@ async function generateTranscripts(deckId: string, modeInput: TranscriptMode) {
                 mimeType: uploadedFile.mimeType ?? "application/pdf",
               },
             },
-            { text: buildGeminiPrompt(processingDeck, mode) },
+            { text: buildGeminiPrompt(processingDeck, mode, options) },
           ],
         },
       ],
       config: {
         temperature: 0.25,
         responseMimeType: "application/json",
-        responseJsonSchema: geminiJsonSchema,
+        responseJsonSchema: options.includeSpeech
+          ? geminiJsonSchema
+          : geminiTeachingOnlyJsonSchema,
       },
     });
 
@@ -516,7 +541,9 @@ async function generateTranscripts(deckId: string, modeInput: TranscriptMode) {
       throw new Error("Gemini returned no transcript text.");
     }
 
-    const parsed = geminiSlidesResponseSchema.parse(JSON.parse(response.text));
+    const parsed = options.includeSpeech
+      ? geminiSlidesResponseSchema.parse(JSON.parse(response.text))
+      : geminiTeachingOnlySlidesResponseSchema.parse(JSON.parse(response.text));
     const parsedByNumber = new Map(parsed.slides.map((slide) => [slide.slideNumber, slide]));
     const existingByNumber = new Map(
       processingDeck.slides.map((slide) => [slide.slideNumber, slide]),
@@ -538,7 +565,7 @@ async function generateTranscripts(deckId: string, modeInput: TranscriptMode) {
       const variant: SlideTranscriptVariant = {
         transcriptMarkdown: normalizedMarkdown,
         transcriptLatex: incoming.transcriptLatex || normalizedMarkdown,
-        speechText: incoming.speechText,
+        speechText: options.includeSpeech ? incoming.speechText : "",
         keyTerms: incoming.keyTerms ?? [],
         generationStatus: "generated",
         ttsStatus: "none",
@@ -688,10 +715,19 @@ async function importExternalTranscripts(
   deckId: string,
   slides: ImportedSlideInput[],
   modeInput: TranscriptMode,
+  optionsInput?: Partial<TranscriptGenerationOptions>,
 ) {
   const mode = coerceTranscriptMode(modeInput);
+  const options = normalizeTranscriptGenerationOptions(optionsInput);
   const deck = await requireDeck(deckId);
   const parsed = importExternalTranscriptsSchema.parse({ slides });
+
+  if (options.includeSpeech) {
+    const emptySpeechSlide = parsed.slides.find((slide) => !slide.speechText.trim());
+    if (emptySpeechSlide) {
+      throw new Error(`Slide ${emptySpeechSlide.slideNumber} is missing speech content.`);
+    }
+  }
 
   if (deck.slides.length > 0 && parsed.slides.length !== deck.slides.length) {
     throw new Error(
@@ -714,12 +750,13 @@ async function importExternalTranscripts(
       const prevVariant =
         existing.transcriptsByMode?.[mode] ??
         (mode === DEFAULT_TRANSCRIPT_MODE ? variantFromSlide(existing) : undefined);
-      const speechChanged = imported.speechText.trim() !== (prevVariant?.speechText.trim() ?? "");
+      const nextSpeechText = options.includeSpeech ? imported.speechText : "";
+      const speechChanged = nextSpeechText.trim() !== (prevVariant?.speechText.trim() ?? "");
 
       const variant: SlideTranscriptVariant = {
         transcriptMarkdown: normalizedMarkdown,
         transcriptLatex: imported.transcriptLatex || normalizedMarkdown,
-        speechText: imported.speechText,
+        speechText: nextSpeechText,
         keyTerms: imported.keyTerms ?? existing.keyTerms,
         generationStatus: "reviewed",
         audioPath: speechChanged ? undefined : prevVariant?.audioPath,
@@ -752,7 +789,7 @@ async function importExternalTranscripts(
         const variant: SlideTranscriptVariant = {
           transcriptMarkdown: normalizedMarkdown,
           transcriptLatex: slide.transcriptLatex || normalizedMarkdown,
-          speechText: slide.speechText,
+          speechText: options.includeSpeech ? slide.speechText : "",
           keyTerms: slide.keyTerms ?? [],
           generationStatus: "reviewed",
           ttsStatus: "none",
@@ -1028,8 +1065,12 @@ function registerIpc(mainWindow: BrowserWindow) {
   ipcMain.handle("decks:get", (_event, deckId: string) => api(() => requireDeck(deckId)));
   ipcMain.handle(
     "decks:generate-transcripts",
-    (_event, deckId: string, mode: TranscriptMode) =>
-      api(() => generateTranscripts(deckId, mode)),
+    (
+      _event,
+      deckId: string,
+      mode: TranscriptMode,
+      options?: Partial<TranscriptGenerationOptions>,
+    ) => api(() => generateTranscripts(deckId, mode, options)),
   );
   ipcMain.handle(
     "decks:save-slide",
@@ -1047,7 +1088,8 @@ function registerIpc(mainWindow: BrowserWindow) {
       deckId: string,
       slides: ImportedSlideInput[],
       mode: TranscriptMode,
-    ) => api(() => importExternalTranscripts(deckId, slides, mode)),
+      options?: Partial<TranscriptGenerationOptions>,
+    ) => api(() => importExternalTranscripts(deckId, slides, mode, options)),
   );
   ipcMain.handle("decks:rename", (_event, deckId: string, title: string) =>
     api(() => renameDeck(deckId, title)),

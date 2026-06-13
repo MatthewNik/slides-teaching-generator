@@ -6,6 +6,10 @@ export type SlideGenerationStatus = "draft" | "generated" | "reviewed" | "error"
 
 export type TtsStatus = "none" | "generating" | "ready" | "error";
 
+export type TranscriptGenerationOptions = {
+  includeSpeech: boolean;
+};
+
 /**
  * A single transcript variant for one slide in one transcript mode.
  * Each mode (summary, conceptual, ...) stores its own variant so switching
